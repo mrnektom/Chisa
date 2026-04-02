@@ -83,8 +83,165 @@ pub fn parse(self: *Self, allocator: std.mem.Allocator) !ZSModule {
     };
 }
 
+fn nextWhenCondPrimary(self: *Self) Error!?ast.ZSWhenCond {
+    if (self.checkToken("!")) {
+        self.shiftToken();
+        const inner = try self.nextWhenCondPrimary() orelse return Error.UnexpectedEndOfInput;
+        const ptr = try self.allocator.create(ast.ZSWhenCond);
+        ptr.* = inner;
+        return ast.ZSWhenCond{ .not = ptr };
+    }
+    if (self.checkToken("(")) {
+        self.shiftToken();
+        const cond = try self.nextWhenCondition() orelse return Error.UnexpectedEndOfInput;
+        try self.expectToken(")");
+        return cond;
+    }
+    // Must be an identifier
+    const tok = self.peekToken() catch return null;
+    if (tok.type != .ident) return null;
+    self.shiftToken();
+    const name = tok.value;
+    // Check for == or !=
+    if (self.checkToken("==")) {
+        self.shiftToken();
+        const valTok = try self.peekToken();
+        if (valTok.type != .string) return Error.UnexpectedTokenType;
+        self.shiftToken();
+        // Strip quotes from the string value
+        const rawVal = valTok.value;
+        const val = if (std.mem.startsWith(u8, rawVal, "\"") and std.mem.endsWith(u8, rawVal, "\""))
+            rawVal[1 .. rawVal.len - 1]
+        else
+            rawVal;
+        return ast.ZSWhenCond{ .eq = .{ .name = name, .value = val } };
+    }
+    if (self.checkToken("!=")) {
+        self.shiftToken();
+        const valTok = try self.peekToken();
+        if (valTok.type != .string) return Error.UnexpectedTokenType;
+        self.shiftToken();
+        const rawVal = valTok.value;
+        const val = if (std.mem.startsWith(u8, rawVal, "\"") and std.mem.endsWith(u8, rawVal, "\""))
+            rawVal[1 .. rawVal.len - 1]
+        else
+            rawVal;
+        return ast.ZSWhenCond{ .neq = .{ .name = name, .value = val } };
+    }
+    // Just a flag name
+    return ast.ZSWhenCond{ .flag = name };
+}
+
+fn nextWhenCondition(self: *Self) Error!?ast.ZSWhenCond {
+    var cond = try self.nextWhenCondPrimary() orelse return null;
+
+    while (true) {
+        if (self.checkToken("&&")) {
+            self.shiftToken();
+            const rhs = try self.nextWhenCondPrimary() orelse return Error.UnexpectedEndOfInput;
+            const lhsPtr = try self.allocator.create(ast.ZSWhenCond);
+            lhsPtr.* = cond;
+            const rhsPtr = try self.allocator.create(ast.ZSWhenCond);
+            rhsPtr.* = rhs;
+            cond = ast.ZSWhenCond{ .and_ = .{ .lhs = lhsPtr, .rhs = rhsPtr } };
+        } else if (self.checkToken("||")) {
+            self.shiftToken();
+            const rhs = try self.nextWhenCondPrimary() orelse return Error.UnexpectedEndOfInput;
+            const lhsPtr = try self.allocator.create(ast.ZSWhenCond);
+            lhsPtr.* = cond;
+            const rhsPtr = try self.allocator.create(ast.ZSWhenCond);
+            rhsPtr.* = rhs;
+            cond = ast.ZSWhenCond{ .or_ = .{ .lhs = lhsPtr, .rhs = rhsPtr } };
+        } else break;
+    }
+    return cond;
+}
+
+fn nextWhenDecl(self: *Self) Error!?ast.ZSWhenDecl {
+    if (!self.checkToken("when")) return null;
+    const startToken = try self.peekToken();
+    self.shiftToken();
+    try self.expectToken("{");
+
+    var arms = try std.ArrayList(ast.ZSWhenArm).initCapacity(self.allocator, 2);
+    defer arms.deinit(self.allocator);
+
+    while (!self.checkToken("}")) {
+        // Parse condition (or 'else')
+        var cond: ?*ast.ZSWhenCond = null;
+        if (self.checkToken("else")) {
+            self.shiftToken();
+        } else {
+            const c = try self.nextWhenCondition() orelse return Error.UnexpectedEndOfInput;
+            const ptr = try self.allocator.create(ast.ZSWhenCond);
+            ptr.* = c;
+            cond = ptr;
+        }
+
+        try self.expectToken("->");
+
+        // Parse arm body: either a block of declarations or a single declaration
+        var nodes = try std.ArrayList(ZSAstNode).initCapacity(self.allocator, 2);
+        defer nodes.deinit(self.allocator);
+
+        if (self.checkToken("{")) {
+            self.shiftToken();
+            while (!self.checkToken("}")) {
+                if (try self.nextNode()) |node| {
+                    try nodes.append(self.allocator, node);
+                } else break;
+            }
+            try self.expectToken("}");
+        } else {
+            if (try self.nextNode()) |node| {
+                try nodes.append(self.allocator, node);
+            }
+        }
+
+        // Optional comma between arms
+        if (self.checkToken(",")) self.shiftToken();
+
+        try arms.append(self.allocator, .{
+            .cond = cond,
+            .nodes = try self.allocator.dupe(ZSAstNode, nodes.items),
+        });
+    }
+
+    const endToken = try self.peekToken();
+    try self.expectToken("}");
+
+    return ast.ZSWhenDecl{
+        .arms = try self.allocator.dupe(ast.ZSWhenArm, arms.items),
+        .startPos = startToken.startPos,
+        .endPos = endToken.endPos,
+    };
+}
+
+fn nextTargetDecl(self: *Self) Error!?ast.ZSTargetDecl {
+    if (!self.checkToken("@target")) return null;
+    const startToken = try self.peekToken();
+    self.shiftToken();
+    try self.expectToken("(");
+    const cond = try self.nextWhenCondition() orelse return Error.UnexpectedEndOfInput;
+    const endToken = try self.peekToken();
+    try self.expectToken(")");
+    const ptr = try self.allocator.create(ast.ZSWhenCond);
+    ptr.* = cond;
+    return ast.ZSTargetDecl{
+        .cond = ptr,
+        .startPos = startToken.startPos,
+        .endPos = endToken.endPos,
+    };
+}
+
 fn nextNode(self: *Self) !?ZSAstNode {
     if (!self.tokenizer.hasNext() and self.peekedToken == null) return null;
+    if (try self.nextTargetDecl()) |td| {
+        return ZSAstNode{ .target_decl = td };
+    }
+    if (try self.nextWhenDecl()) |wd| {
+        return ZSAstNode{ .when_decl = wd };
+    }
     if (try self.nextImport()) |imp| {
         return ZSAstNode{ .import_decl = imp };
     }
@@ -234,8 +391,11 @@ fn nextStmt(self: *Self) !?ast.stmt.ZSStmt {
     const modifiers = try self.nextModifiers();
     if (try self.nextStruct(modifiers)) |s| return ast.stmt.ZSStmt{ .struct_decl = s };
     if (try self.nextEnum(modifiers)) |e| return ast.stmt.ZSStmt{ .enum_decl = e };
+    if (try self.nextTypeAlias(modifiers)) |ta| return ast.stmt.ZSStmt{ .type_alias = ta };
+    if (try self.nextScalar()) |sd| return ast.stmt.ZSStmt{ .scalar_decl = sd };
     if (try self.nextVar(modifiers)) |v| return ast.stmt.ZSStmt{ .variable = v };
     if (try self.nextFn(modifiers)) |f| return ast.stmt.ZSStmt{ .function = f };
+    if (try self.nextAsmBlock()) |ab| return ast.stmt.ZSStmt{ .asm_block = ab };
     if (try self.nextReassign()) |r| return ast.stmt.ZSStmt{ .reassign = r };
 
     // No statement matched — restore tokens consumed by nextModifiers
@@ -243,6 +403,83 @@ fn nextStmt(self: *Self) !?ast.stmt.ZSStmt {
     self.tokenizer.position = savedPos;
     self.tokenizer.line = savedLine;
     return Error.UnknownToken;
+}
+
+fn nextAsmBlock(self: *Self) Error!?ast.stmt.ZSAsmBlock {
+    if (!self.checkToken("asm")) return null;
+    const startToken = try self.peekToken();
+    self.shiftToken(); // consume 'asm'
+    try self.expectToken("{");
+
+    var inputs = try std.ArrayList(ast.stmt.ZSAsmInput).initCapacity(self.allocator, 2);
+    defer inputs.deinit(self.allocator);
+    var outputs = try std.ArrayList(ast.stmt.ZSAsmOut).initCapacity(self.allocator, 2);
+    defer outputs.deinit(self.allocator);
+    var clobbers = try std.ArrayList([]const u8).initCapacity(self.allocator, 2);
+    defer clobbers.deinit(self.allocator);
+    var instructions = try std.ArrayList([]const u8).initCapacity(self.allocator, 4);
+    defer instructions.deinit(self.allocator);
+
+    while (!self.checkToken("}")) {
+        if (self.checkToken("in")) {
+            self.shiftToken();
+            const regTok = try self.peekToken();
+            if (regTok.type != .ident) return Error.UnexpectedTokenType;
+            const reg = regTok.value;
+            self.shiftToken();
+            try self.expectToken("=");
+            const expr = try self.nextExpr() orelse return Error.UnexpectedEndOfInput;
+            try inputs.append(self.allocator, .{ .reg = reg, .expr = expr });
+        } else if (self.checkToken("out")) {
+            self.shiftToken();
+            const regTok = try self.peekToken();
+            if (regTok.type != .ident) return Error.UnexpectedTokenType;
+            const reg = regTok.value;
+            self.shiftToken();
+            try self.expectToken("=");
+            const nameTok = try self.peekToken();
+            if (nameTok.type != .ident) return Error.UnexpectedTokenType;
+            const name = nameTok.value;
+            self.shiftToken();
+            try outputs.append(self.allocator, .{ .reg = reg, .name = name });
+        } else if (self.checkToken("clobber")) {
+            self.shiftToken();
+            while (true) {
+                const regTok = try self.peekToken();
+                if (regTok.type != .ident) return Error.UnexpectedTokenType;
+                self.shiftToken();
+                try clobbers.append(self.allocator, regTok.value);
+                if (self.checkToken(",")) {
+                    self.shiftToken();
+                    continue;
+                }
+                break;
+            }
+        } else {
+            // Assembly instruction string
+            const tok = try self.peekToken();
+            if (tok.type != .string) return Error.UnexpectedTokenType;
+            self.shiftToken();
+            // Strip surrounding quotes from the string token value
+            if (std.mem.startsWith(u8, tok.value, "\"") and std.mem.endsWith(u8, tok.value, "\"")) {
+                try instructions.append(self.allocator, tok.value[1..(tok.value.len - 1)]);
+            } else {
+                try instructions.append(self.allocator, tok.value);
+            }
+        }
+    }
+
+    const endToken = try self.peekToken();
+    try self.expectToken("}");
+
+    return ast.stmt.ZSAsmBlock{
+        .inputs = try self.allocator.dupe(ast.stmt.ZSAsmInput, inputs.items),
+        .outputs = try self.allocator.dupe(ast.stmt.ZSAsmOut, outputs.items),
+        .clobbers = try self.allocator.dupe([]const u8, clobbers.items),
+        .instructions = try self.allocator.dupe([]const u8, instructions.items),
+        .startPos = startToken.startPos,
+        .endPos = endToken.endPos,
+    };
 }
 
 fn nextReassign(self: *Self) Error!?ast.stmt.ZSReassign {
@@ -316,14 +553,110 @@ fn nextReassign(self: *Self) Error!?ast.stmt.ZSReassign {
 }
 
 fn isKeyword(value: []const u8) bool {
-    const keywords = [_][]const u8{ "if", "while", "for", "break", "continue", "return", "else", "let", "const", "fn", "struct", "enum", "match", "use", "external", "true", "false", "import", "export", "from", "as", "char" };
+    const keywords = [_][]const u8{ "if", "while", "for", "break", "continue", "return", "else", "let", "const", "fn", "struct", "enum", "match", "use", "external", "true", "false", "import", "export", "from", "as", "char", "scalar", "type", "asm" };
     for (keywords) |kw| {
         if (std.mem.eql(u8, value, kw)) return true;
     }
     return false;
 }
 
-fn nextExpr(self: *Self) Error!?ast.expr.ZSExpr {
+fn isIdentValue(value: []const u8) bool {
+    if (value.len == 0) return false;
+    if (!std.ascii.isAlphabetic(value[0]) and value[0] != '_') return false;
+    if (isKeyword(value)) return false;
+    return true;
+}
+
+fn nextLambda(self: *Self) Error!?ast.expr.ZSExpr {
+    if (!self.checkToken("{")) return null;
+
+    const savedPeeked = self.peekedToken;
+    const savedPos = self.tokenizer.position;
+    const savedLine = self.tokenizer.line;
+
+    const startToken = try self.peekToken();
+    const startPos = startToken.startPos;
+    self.shiftToken(); // consume '{'
+
+    var params = try std.ArrayList(ast.expr.ZSLambdaParam).initCapacity(self.allocator, 2);
+    defer params.deinit(self.allocator);
+
+    var hasArrow = false;
+
+    if (self.checkToken("->")) {
+        // No-param lambda: { -> body }
+        self.shiftToken();
+        hasArrow = true;
+    } else {
+        // Try: ident [, ident]* ->
+        var ok = true;
+        parseLoop: while (true) {
+            const tok = self.peekToken() catch {
+                ok = false;
+                break :parseLoop;
+            };
+            if (tok.type != .ident or !isIdentValue(tok.value)) {
+                ok = false;
+                break :parseLoop;
+            }
+            self.shiftToken();
+            try params.append(self.allocator, .{ .name = tok.value });
+            if (self.checkToken(",")) {
+                self.shiftToken();
+                continue;
+            }
+            if (self.checkToken("->")) {
+                self.shiftToken();
+                hasArrow = true;
+                break :parseLoop;
+            }
+            ok = false;
+            break :parseLoop;
+        }
+        if (!ok or !hasArrow) {
+            // Not a lambda, backtrack
+            params.clearAndFree(self.allocator);
+            self.peekedToken = savedPeeked;
+            self.tokenizer.position = savedPos;
+            self.tokenizer.line = savedLine;
+            return null;
+        }
+    }
+
+    const bodyExpr = (try self.nextExpr()) orelse {
+        self.peekedToken = savedPeeked;
+        self.tokenizer.position = savedPos;
+        self.tokenizer.line = savedLine;
+        return null;
+    };
+
+    const endTok = self.peekToken() catch {
+        self.peekedToken = savedPeeked;
+        self.tokenizer.position = savedPos;
+        self.tokenizer.line = savedLine;
+        return null;
+    };
+    const endPos = endTok.endPos;
+    self.expectToken("}") catch {
+        self.peekedToken = savedPeeked;
+        self.tokenizer.position = savedPos;
+        self.tokenizer.line = savedLine;
+        return null;
+    };
+
+    const bodyPtr = try self.allocator.create(ast.expr.ZSExpr);
+    bodyPtr.* = bodyExpr;
+
+    return ast.expr.ZSExpr{ .lambda = .{
+        .params = try self.allocator.dupe(ast.expr.ZSLambdaParam, params.items),
+        .body = bodyPtr,
+        .startPos = startPos,
+        .endPos = endPos,
+    } };
+}
+
+/// Parse a primary expression: everything except binary operators.
+fn nextPrimaryExpr(self: *Self) Error!?ast.expr.ZSExpr {
     var expr = blk: {
         if (try self.nextMatchExpr()) |m| break :blk ast.expr.ZSExpr{ .match_expr = m };
         if (try self.nextIfExpr()) |e| break :blk ast.expr.ZSExpr{ .if_expr = e };
@@ -332,6 +665,7 @@ fn nextExpr(self: *Self) Error!?ast.expr.ZSExpr {
         if (try self.nextBreak()) |b| break :blk ast.expr.ZSExpr{ .break_expr = b };
         if (try self.nextContinue()) |c| break :blk ast.expr.ZSExpr{ .continue_expr = c };
         if (try self.nextReturn()) |r| break :blk ast.expr.ZSExpr{ .return_expr = r };
+        if (try self.nextLambda()) |l| break :blk l;
         if (try self.nextBlock()) |b| break :blk ast.expr.ZSExpr{ .block = b };
         if (try self.nextUnaryNot()) |u| break :blk ast.expr.ZSExpr{ .unary = u };
         if (try self.nextArrayLiteral()) |a| break :blk ast.expr.ZSExpr{ .array_literal = a };
@@ -362,19 +696,71 @@ fn nextExpr(self: *Self) Error!?ast.expr.ZSExpr {
         var callExpr = ast.expr.ZSExpr{ .call = call };
         // Check for postfix after call
         callExpr = try self.nextPostfixChain(callExpr);
-        // Check for binary op after call
-        if (try self.nextBinaryRhs(callExpr)) |bin| {
-            return ast.expr.ZSExpr{ .binary = bin };
-        }
         return callExpr;
     }
 
-    // Check for binary op (==, !=)
-    if (try self.nextBinaryRhs(expr)) |bin| {
-        return ast.expr.ZSExpr{ .binary = bin };
-    }
-
     return expr;
+}
+
+/// Returns the binary operator string if the next token is one, without consuming it.
+fn peekBinaryOp(self: *Self) ?[]const u8 {
+    if (self.checkToken("||")) return "||";
+    if (self.checkToken("&&")) return "&&";
+    if (self.checkToken("==")) return "==";
+    if (self.checkToken("!=")) return "!=";
+    if (self.checkToken(">=")) return ">=";
+    if (self.checkToken("<=")) return "<=";
+    if (self.checkToken(">"))  return ">";
+    if (self.checkToken("<"))  return "<";
+    if (self.checkToken("+"))  return "+";
+    if (self.checkToken("-"))  return "-";
+    if (self.checkToken("*"))  return "*";
+    if (self.checkToken("/"))  return "/";
+    if (self.checkToken("%"))  return "%";
+    return null;
+}
+
+fn opPrecedence(op: []const u8) u32 {
+    if (std.mem.eql(u8, op, "||")) return 1;
+    if (std.mem.eql(u8, op, "&&")) return 2;
+    if (std.mem.eql(u8, op, "==") or std.mem.eql(u8, op, "!=")) return 3;
+    if (std.mem.eql(u8, op, "<")  or std.mem.eql(u8, op, ">")  or
+        std.mem.eql(u8, op, "<=") or std.mem.eql(u8, op, ">=")) return 4;
+    if (std.mem.eql(u8, op, "+")  or std.mem.eql(u8, op, "-"))  return 5;
+    if (std.mem.eql(u8, op, "*")  or std.mem.eql(u8, op, "/")  or
+        std.mem.eql(u8, op, "%"))  return 6;
+    return 0;
+}
+
+/// Precedence-climbing: builds a left-associative binary tree from `lhs_in`
+/// consuming only operators with precedence >= minPrec.
+fn parseBinaryChain(self: *Self, lhs_in: ast.expr.ZSExpr, minPrec: u32) Error!ast.expr.ZSExpr {
+    var result = lhs_in;
+    while (true) {
+        const op = self.peekBinaryOp() orelse break;
+        const prec = opPrecedence(op);
+        if (prec < minPrec) break;
+        self.shiftToken();
+        const rhsPrimary = try self.nextPrimaryExpr() orelse return Error.UnexpectedEndOfInput;
+        const rhs = try self.parseBinaryChain(rhsPrimary, prec + 1);
+        const lhsPtr = try self.allocator.create(ast.expr.ZSExpr);
+        lhsPtr.* = result;
+        const rhsPtr = try self.allocator.create(ast.expr.ZSExpr);
+        rhsPtr.* = rhs;
+        result = ast.expr.ZSExpr{ .binary = .{
+            .lhs = lhsPtr,
+            .op = op,
+            .rhs = rhsPtr,
+            .startPos = lhsPtr.start(),
+            .endPos = rhsPtr.end(),
+        } };
+    }
+    return result;
+}
+
+fn nextExpr(self: *Self) Error!?ast.expr.ZSExpr {
+    const primary = try self.nextPrimaryExpr() orelse return null;
+    return try self.parseBinaryChain(primary, 1);
 }
 
 /// Try to parse generic type arguments after a reference: name<Type, ...>
@@ -590,6 +976,178 @@ fn nextPostfixChain(self: *Self, initial: ast.expr.ZSExpr) Error!ast.expr.ZSExpr
                 .startPos = current.start(),
                 .endPos = fieldToken.endPos,
             } };
+        } else if (self.checkToken("?.")) {
+            // Safe navigation: desugar opt?.field into opt.map({ v -> v.field })
+            //                   and opt?.method(args) into opt.map({ v -> v.method(args) })
+            self.shiftToken(); // consume '?.'
+            const fieldToken = try self.peekToken();
+            if (fieldToken.type != .ident) return Error.UnexpectedTokenType;
+            self.shiftToken(); // consume field/method name
+
+            // Build lambda parameter reference: v
+            const vRef = ast.expr.ZSExpr{ .reference = .{
+                .name = "v",
+                .startPos = fieldToken.startPos,
+                .endPos = fieldToken.endPos,
+            } };
+
+            // Build lambda body: either v.field or v.method(args)
+            var lambdaBody: ast.expr.ZSExpr = undefined;
+            if (self.checkToken("(")) {
+                // opt?.method(args) -> opt.map({ v -> v.method(args) })
+                self.shiftToken(); // consume '('
+                var args = try std.ArrayList(ast.expr.ZSExpr).initCapacity(self.allocator, 2);
+                defer args.deinit(self.allocator);
+                if (!self.checkToken(")")) {
+                    while (true) {
+                        const arg = try self.nextExpr() orelse return Error.UnexpectedEndOfInput;
+                        try args.append(self.allocator, arg);
+                        if (self.checkToken(",")) {
+                            self.shiftToken();
+                            continue;
+                        }
+                        break;
+                    }
+                }
+                const closeToken = try self.peekToken();
+                try self.expectToken(")");
+
+                // Build: v.method
+                const vRefPtr = try self.allocator.create(ast.expr.ZSExpr);
+                vRefPtr.* = vRef;
+                const fieldAccess = ast.expr.ZSExpr{ .field_access = .{
+                    .subject = vRefPtr,
+                    .field = fieldToken.value,
+                    .startPos = fieldToken.startPos,
+                    .endPos = fieldToken.endPos,
+                } };
+
+                // Build: v.method(args)
+                const fieldAccessPtr = try self.allocator.create(ast.expr.ZSExpr);
+                fieldAccessPtr.* = fieldAccess;
+                const argsSlice = try self.allocator.dupe(ast.expr.ZSExpr, args.items);
+                lambdaBody = ast.expr.ZSExpr{ .call = .{
+                    .subject = fieldAccessPtr,
+                    .arguments = argsSlice,
+                    .startPos = fieldToken.startPos,
+                    .endPos = closeToken.endPos,
+                } };
+            } else {
+                // opt?.field -> opt.map({ v -> v.field })
+                const vRefPtr = try self.allocator.create(ast.expr.ZSExpr);
+                vRefPtr.* = vRef;
+                lambdaBody = ast.expr.ZSExpr{ .field_access = .{
+                    .subject = vRefPtr,
+                    .field = fieldToken.value,
+                    .startPos = fieldToken.startPos,
+                    .endPos = fieldToken.endPos,
+                } };
+            }
+
+            // Build lambda: { v -> lambdaBody }
+            const lambdaBodyPtr = try self.allocator.create(ast.expr.ZSExpr);
+            lambdaBodyPtr.* = lambdaBody;
+            const lambdaParams = try self.allocator.alloc(ast.expr.ZSLambdaParam, 1);
+            lambdaParams[0] = .{ .name = "v" };
+            const lambdaExpr = ast.expr.ZSExpr{ .lambda = .{
+                .params = lambdaParams,
+                .body = lambdaBodyPtr,
+                .startPos = current.start(),
+                .endPos = fieldToken.endPos,
+            } };
+
+            // Build: current.map (field access on the receiver)
+            const currentPtr = try self.allocator.create(ast.expr.ZSExpr);
+            currentPtr.* = current;
+            const mapAccess = ast.expr.ZSExpr{ .field_access = .{
+                .subject = currentPtr,
+                .field = "map",
+                .startPos = current.start(),
+                .endPos = fieldToken.endPos,
+            } };
+            const mapAccessPtr = try self.allocator.create(ast.expr.ZSExpr);
+            mapAccessPtr.* = mapAccess;
+
+            // Build: current.map(lambda)
+            const mapArgs = try self.allocator.alloc(ast.expr.ZSExpr, 1);
+            mapArgs[0] = lambdaExpr;
+            current = ast.expr.ZSExpr{ .call = .{
+                .subject = mapAccessPtr,
+                .arguments = mapArgs,
+                .startPos = current.start(),
+                .endPos = fieldToken.endPos,
+            } };
+            continue;
+        } else if (self.checkToken("!!")) {
+            // Error propagation: desugar expr!! into
+            // match expr { Either.Left(__e) -> return __e, Either.Right(__v) -> __v }
+            self.shiftToken(); // consume '!!'
+            const startPos = current.start();
+            const endPos = current.end();
+
+            // Use expr directly as the match subject (it must already be Either<L,R>)
+            const matchSubjectPtr = try self.allocator.create(ast.expr.ZSExpr);
+            matchSubjectPtr.* = current;
+
+            // Left arm: Either.Left(__e) -> return Either.Left(__e)
+            const eRef = ast.expr.ZSExpr{ .reference = .{
+                .name = "__e",
+                .startPos = startPos,
+                .endPos = endPos,
+            } };
+            const eRefPtr = try self.allocator.create(ast.expr.ZSExpr);
+            eRefPtr.* = eRef;
+            const eitherLeftPtr = try self.allocator.create(ast.expr.ZSExpr);
+            eitherLeftPtr.* = ast.expr.ZSExpr{ .enum_init = .{
+                .enum_name = "Either",
+                .variant_name = "Left",
+                .payload = eRefPtr,
+                .startPos = startPos,
+                .endPos = endPos,
+            } };
+            const returnEPtr = try self.allocator.create(ast.expr.ZSExpr);
+            returnEPtr.* = ast.expr.ZSExpr{ .return_expr = .{
+                .value = eitherLeftPtr,
+                .startPos = startPos,
+                .endPos = endPos,
+            } };
+
+            // Right arm: Either.Right(__v) -> __v
+            const vRefPtr = try self.allocator.create(ast.expr.ZSExpr);
+            vRefPtr.* = ast.expr.ZSExpr{ .reference = .{
+                .name = "__v",
+                .startPos = startPos,
+                .endPos = endPos,
+            } };
+
+            // Build the match arms
+            const arms = try self.allocator.alloc(ast.expr.ZSMatchArm, 2);
+            arms[0] = .{
+                .pattern = ast.expr.ZSMatchArmPattern{ .enum_variant = .{
+                    .enum_name = "Either",
+                    .variant_name = "Left",
+                    .binding = "__e",
+                } },
+                .body = returnEPtr,
+            };
+            arms[1] = .{
+                .pattern = ast.expr.ZSMatchArmPattern{ .enum_variant = .{
+                    .enum_name = "Either",
+                    .variant_name = "Right",
+                    .binding = "__v",
+                } },
+                .body = vRefPtr,
+            };
+
+            current = ast.expr.ZSExpr{ .match_expr = .{
+                .subject = matchSubjectPtr,
+                .arms = arms,
+                .has_else = false,
+                .else_body = null,
+                .startPos = startPos,
+                .endPos = endPos,
+            } };
+            continue;
         } else if (self.checkToken("[")) {
             self.shiftToken(); // consume '['
             const indexExpr = try self.nextExpr() orelse return Error.UnexpectedEndOfInput;
@@ -686,39 +1244,6 @@ fn nextArrayLiteral(self: *Self) Error!?ast.expr.ZSArrayLiteral {
     };
 }
 
-fn nextBinaryRhs(self: *Self, lhs: ast.expr.ZSExpr) Error!?ast.expr.ZSBinary {
-    const op = blk: {
-        if (self.checkToken("&&")) break :blk "&&";
-        if (self.checkToken("||")) break :blk "||";
-        if (self.checkToken("==")) break :blk "==";
-        if (self.checkToken("!=")) break :blk "!=";
-        if (self.checkToken(">=")) break :blk ">=";
-        if (self.checkToken("<=")) break :blk "<=";
-        if (self.checkToken(">")) break :blk ">";
-        if (self.checkToken("<")) break :blk "<";
-        if (self.checkToken("+")) break :blk "+";
-        if (self.checkToken("-")) break :blk "-";
-        if (self.checkToken("*")) break :blk "*";
-        if (self.checkToken("/")) break :blk "/";
-        if (self.checkToken("%")) break :blk "%";
-        return null;
-    };
-    self.shiftToken();
-    const rhs = try self.nextExpr() orelse return Error.UnexpectedEndOfInput;
-
-    const lhsPtr = try self.allocator.create(ast.expr.ZSExpr);
-    lhsPtr.* = lhs;
-    const rhsPtr = try self.allocator.create(ast.expr.ZSExpr);
-    rhsPtr.* = rhs;
-
-    return ast.expr.ZSBinary{
-        .lhs = lhsPtr,
-        .op = op,
-        .rhs = rhsPtr,
-        .startPos = lhs.start(),
-        .endPos = rhs.end(),
-    };
-}
 
 fn nextIfExpr(self: *Self) Error!?ast.expr.ZSIfExpr {
     if (!(self.checkToken("if"))) return null;
@@ -956,6 +1481,61 @@ fn nextFn(self: *Self, modifiers: ast.stmt.Modifiers) Error!?ast.stmt.ZSFn {
     self.shiftToken();
     const name = try self.nextIdent();
 
+    // Detect extension function syntax: fn ReceiverType.methodName(...)
+    // or fn ReceiverType<T, U>.methodName(...)
+    var receiver_type: ?[]const u8 = null;
+    var receiver_type_params_list = try std.ArrayList([]const u8).initCapacity(self.allocator, 2);
+    defer receiver_type_params_list.deinit(self.allocator);
+    var fn_name: []const u8 = name;
+
+    // Check for optional receiver type params <T, U> before the dot
+    if (self.checkToken("<")) {
+        // Save state for backtracking — could be fn-level type params
+        const savedPeeked = self.peekedToken;
+        const savedPos = self.tokenizer.position;
+        const savedLine = self.tokenizer.line;
+
+        self.shiftToken(); // consume '<'
+        var tempParams = try std.ArrayList([]const u8).initCapacity(self.allocator, 2);
+        defer tempParams.deinit(self.allocator);
+        while (true) {
+            const paramName = try self.nextIdent();
+            try tempParams.append(self.allocator, paramName);
+            if (self.checkToken(",")) {
+                self.shiftToken();
+                continue;
+            }
+            break;
+        }
+        if (self.checkToken(">")) {
+            self.shiftToken(); // consume '>'
+            if (self.checkToken(".")) {
+                // This is receiver type params: fn ReceiverType<T>.method(...)
+                self.shiftToken(); // consume '.'
+                receiver_type = name;
+                for (tempParams.items) |p| {
+                    try receiver_type_params_list.append(self.allocator, p);
+                }
+                fn_name = try self.nextIdent();
+            } else {
+                // Not an extension function — backtrack and let normal type_params parsing handle it
+                self.peekedToken = savedPeeked;
+                self.tokenizer.position = savedPos;
+                self.tokenizer.line = savedLine;
+            }
+        } else {
+            // Not valid generic syntax — backtrack
+            self.peekedToken = savedPeeked;
+            self.tokenizer.position = savedPos;
+            self.tokenizer.line = savedLine;
+        }
+    } else if (self.checkToken(".")) {
+        // Simple extension: fn ReceiverType.methodName(...)
+        self.shiftToken(); // consume '.'
+        receiver_type = name;
+        fn_name = try self.nextIdent();
+    }
+
     // Parse optional type parameters: <T, U>
     var type_params = try std.ArrayList([]const u8).initCapacity(self.allocator, 2);
     defer type_params.deinit(self.allocator);
@@ -1009,7 +1589,9 @@ fn nextFn(self: *Self, modifiers: ast.stmt.Modifiers) Error!?ast.stmt.ZSFn {
     }
 
     return ast.stmt.ZSFn{
-        .name = name,
+        .name = fn_name,
+        .receiver_type = receiver_type,
+        .receiver_type_params = try self.allocator.dupe([]const u8, receiver_type_params_list.items),
         .type_params = try self.allocator.dupe([]const u8, type_params.items),
         .modifiers = modifiers,
         .args = try self.allocator.dupe(ast.stmt.ZSFn.Arg, args.items),
@@ -1071,6 +1653,50 @@ fn nextStruct(self: *Self, modifiers: ast.stmt.Modifiers) Error!?ast.stmt.ZSStru
         .startPos = startToken.startPos,
         .endPos = endToken.endPos,
     };
+}
+
+fn nextTypeAlias(self: *Self, modifiers: ast.stmt.Modifiers) Error!?ast.stmt.ZSTypeAlias {
+    if (!self.checkToken("type")) return null;
+    const startToken = try self.peekToken();
+    self.shiftToken();
+
+    const name = try self.nextIdent();
+
+    // Optional type params: <T, U>
+    var type_params = try std.ArrayList([]const u8).initCapacity(self.allocator, 2);
+    defer type_params.deinit(self.allocator);
+    if (self.checkToken("<")) {
+        self.shiftToken();
+        while (true) {
+            const paramName = try self.nextIdent();
+            try type_params.append(self.allocator, paramName);
+            if (self.checkToken(",")) {
+                self.shiftToken();
+                continue;
+            }
+            break;
+        }
+        try self.expectToken(">");
+    }
+
+    try self.expectToken("=");
+    const aliasedType = try self.nextTypeInner();
+
+    return ast.stmt.ZSTypeAlias{
+        .name = name,
+        .type_params = try self.allocator.dupe([]const u8, type_params.items),
+        .aliased_type = aliasedType,
+        .modifiers = modifiers,
+        .startPos = startToken.startPos,
+    };
+}
+
+fn nextScalar(self: *Self) Error!?ast.stmt.ZSScalarDecl {
+    if (!self.checkToken("scalar")) return null;
+    const kwTok = try self.peekToken();
+    self.shiftToken();
+    const name = try self.nextIdent();
+    return ast.stmt.ZSScalarDecl{ .name = name, .startPos = kwTok.startPos };
 }
 
 fn nextEnum(self: *Self, modifiers: ast.stmt.Modifiers) Error!?ast.stmt.ZSEnum {
@@ -1331,7 +1957,37 @@ fn nextType(self: *Self) !?ast.ZSType {
     return try self.nextTypeInner();
 }
 
-fn nextTypeInner(self: *Self) !ast.ZSType {
+fn nextFnType(self: *Self) Error!ast.ZSType {
+    // current token is '(' — already checked by caller
+    self.shiftToken(); // consume '('
+    var paramTypes = try std.ArrayList(ast.type_notation.ZSType).initCapacity(self.allocator, 2);
+    defer paramTypes.deinit(self.allocator);
+
+    if (!self.checkToken(")")) {
+        while (true) {
+            const t = try self.nextTypeInner();
+            try paramTypes.append(self.allocator, t);
+            if (self.checkToken(",")) {
+                self.shiftToken();
+                continue;
+            }
+            break;
+        }
+    }
+    try self.expectToken(")");
+    try self.expectToken("->");
+    const retType = try self.nextTypeInner();
+
+    const retPtr = try self.allocator.create(ast.type_notation.ZSType);
+    retPtr.* = retType;
+    return ast.ZSType{ .fn_type = .{
+        .param_types = try self.allocator.dupe(ast.type_notation.ZSType, paramTypes.items),
+        .return_type = retPtr,
+    } };
+}
+
+fn nextTypeInner(self: *Self) Error!ast.ZSType {
+    if (self.checkToken("(")) return try self.nextFnType();
     const typeName = try self.nextIdent();
 
     // Check for generic type args: Name<T, U>
@@ -1409,10 +2065,10 @@ fn nextCall(self: *Self, subject: ast.expr.ZSExpr) Error!?ast.expr.ZSCall {
     const end = (try self.peekToken()).endPos;
     try self.expectToken(")");
     const arguments = try self.allocator.dupe(ast.expr.ZSExpr, args.items);
-    const expr = try self.allocator.alloc(ast.expr.ZSExpr, 1);
-    expr[0] = subject;
+    const subjectPtr = try self.allocator.create(ast.expr.ZSExpr);
+    subjectPtr.* = subject;
     return ast.expr.ZSCall{
-        .subject = &expr[0],
+        .subject = subjectPtr,
         .arguments = arguments,
         .startPos = start,
         .endPos = end,

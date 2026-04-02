@@ -21,9 +21,11 @@ allocatedStrings: std.ArrayList([]const u8),
 allocatedTypes: std.ArrayList(*Symbol.ZSType),
 allocatedSliceLists: std.ArrayList([]const []const u8),
 allocatedStructFields: std.ArrayList([]sig.ZSStructField),
+allocatedFnArgs: std.ArrayList([]sig.ZSFnArg),
 allocatedTypeSlices: std.ArrayList([]const Symbol.ZSType),
 allocatedAstTypeSlices: std.ArrayList([]const ast.type_notation.ZSType),
 allocatedAstStructFields: std.ArrayList([]const ast.stmt.ZSStruct.ZSStructField),
+scalarDefs: std.StringHashMap(Symbol.ZSType),
 structDefs: std.StringHashMap(StructDef),
 exportedStructDefs: std.StringHashMap(StructDef),
 fieldIndices: std.AutoHashMap(usize, u32),
@@ -34,6 +36,7 @@ allocatedEnumVariants: std.ArrayList([]sig.ZSEnumVariant),
 enumInits: std.AutoHashMap(usize, EnumInitInfo),
 derefTypes: std.AutoHashMap(usize, []const u8),
 indexElemTypes: std.AutoHashMap(usize, []const u8),
+arrayLiteralElemTypes: std.AutoHashMap(usize, []const u8),
 genericFns: std.StringHashMap(GenericFnDef),
 monomorphizedFns: std.StringHashMap(void),
 monomorphizedFunctions: std.ArrayList(ast.stmt.ZSFn),
@@ -41,9 +44,15 @@ structInitResolutions: std.AutoHashMap(usize, []const u8),
 monomorphizedEnums: std.StringHashMap(MonomorphizedEnumDef),
 matchEnumNames: std.AutoHashMap(usize, []const u8),
 typeParamBindings: ?TypeParamBindings,
+extensionFns: std.StringHashMap(std.ArrayList(OverloadEntry)),
+extensionCalls: std.AutoHashMap(usize, void),
+lambdaNames: std.AutoHashMap(usize, []const u8),
+lambdaCount: usize,
 typeResolutionDepth: u32,
 inLoop: bool,
+typeAliases: std.StringHashMap(TypeAliasDef),
 expectedType: ?Symbol.ZSType = null,
+currentFnReturnType: ?Symbol.ZSType = null,
 
 pub const EnumInitInfo = struct {
     enumName: []const u8,
@@ -82,6 +91,11 @@ pub const GenericFnDef = struct {
     type_params: []const []const u8,
 };
 
+pub const TypeAliasDef = struct {
+    type_params: []const []const u8,
+    aliased_type: ast.type_notation.ZSType,
+};
+
 pub const OverloadEntry = struct {
     argTypes: []const []const u8,
     mangledName: []const u8,
@@ -93,6 +107,8 @@ const Error = error{} || std.mem.Allocator.Error || sts.Error;
 
 pub const AnalyzeResult = struct {
     exports: SymbolTable,
+    /// All top-level symbols in this module (exported or not). Used by the daemon for hover.
+    moduleScope: SymbolTable,
     errors: []AnalyzeError,
     resolutions: std.AutoHashMap(usize, []const u8),
     overloadedNames: std.StringHashMap(void),
@@ -101,9 +117,11 @@ pub const AnalyzeResult = struct {
     allocatedTypes: std.ArrayList(*Symbol.ZSType),
     allocatedSliceLists: std.ArrayList([]const []const u8),
     allocatedStructFields: std.ArrayList([]sig.ZSStructField),
+    allocatedFnArgs: std.ArrayList([]sig.ZSFnArg),
     allocatedTypeSlices: std.ArrayList([]const Symbol.ZSType),
     allocatedAstTypeSlices: std.ArrayList([]const ast.type_notation.ZSType),
     allocatedAstStructFields: std.ArrayList([]const ast.stmt.ZSStruct.ZSStructField),
+    scalarDefs: std.StringHashMap(Symbol.ZSType),
     structDefs: std.StringHashMap(StructDef),
     exportedStructDefs: std.StringHashMap(StructDef),
     fieldIndices: std.AutoHashMap(usize, u32),
@@ -113,15 +131,21 @@ pub const AnalyzeResult = struct {
     enumInits: std.AutoHashMap(usize, EnumInitInfo),
     derefTypes: std.AutoHashMap(usize, []const u8),
     indexElemTypes: std.AutoHashMap(usize, []const u8),
+    arrayLiteralElemTypes: std.AutoHashMap(usize, []const u8),
     genericFns: std.StringHashMap(GenericFnDef),
     monomorphizedFunctions: std.ArrayList(ast.stmt.ZSFn),
     structInitResolutions: std.AutoHashMap(usize, []const u8),
     monomorphizedEnums: std.StringHashMap(MonomorphizedEnumDef),
     matchEnumNames: std.AutoHashMap(usize, []const u8),
+    extensionFns: std.StringHashMap(std.ArrayList(OverloadEntry)),
+    extensionCalls: std.AutoHashMap(usize, void),
+    lambdaNames: std.AutoHashMap(usize, []const u8),
+    typeAliases: std.StringHashMap(TypeAliasDef),
 
     pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
         allocator.free(self.errors);
         self.exports.deinit();
+        self.moduleScope.deinit();
 
         self.resolutions.deinit();
 
@@ -158,6 +182,12 @@ pub const AnalyzeResult = struct {
         }
         self.allocatedStructFields.deinit(allocator);
 
+        // Free all tracked fn arg slices
+        for (self.allocatedFnArgs.items) |s| {
+            allocator.free(s);
+        }
+        self.allocatedFnArgs.deinit(allocator);
+
         // Free all tracked type slices
         for (self.allocatedTypeSlices.items) |s| {
             allocator.free(s);
@@ -176,6 +206,7 @@ pub const AnalyzeResult = struct {
         }
         self.allocatedAstStructFields.deinit(allocator);
 
+        self.scalarDefs.deinit();
         self.structDefs.deinit();
         self.exportedStructDefs.deinit();
         self.fieldIndices.deinit();
@@ -189,6 +220,7 @@ pub const AnalyzeResult = struct {
         self.enumInits.deinit();
         self.derefTypes.deinit();
         self.indexElemTypes.deinit();
+        self.arrayLiteralElemTypes.deinit();
         self.genericFns.deinit();
         for (self.monomorphizedFunctions.items) |func| {
             allocator.free(func.args);
@@ -197,6 +229,14 @@ pub const AnalyzeResult = struct {
         self.structInitResolutions.deinit();
         self.monomorphizedEnums.deinit();
         self.matchEnumNames.deinit();
+        var extFnIter = self.extensionFns.iterator();
+        while (extFnIter.next()) |entry| {
+            entry.value_ptr.deinit(allocator);
+        }
+        self.extensionFns.deinit();
+        self.extensionCalls.deinit();
+        self.lambdaNames.deinit();
+        self.typeAliases.deinit();
     }
 };
 
@@ -229,10 +269,10 @@ fn isNumericType(name: []const u8) bool {
 }
 
 pub fn analyze(module: zsm.ZSModule, allocator: std.mem.Allocator, deps: *const std.StringHashMap(AnalyzeResult)) !AnalyzeResult {
-    return analyzeWithPrelude(module, allocator, deps, null, null, null, null, null);
+    return analyzeWithPrelude(module, allocator, deps, null, null, null, null, null, null);
 }
 
-pub fn analyzeWithPrelude(module: zsm.ZSModule, allocator: std.mem.Allocator, deps: *const std.StringHashMap(AnalyzeResult), preludeExports: ?*const SymbolTable, preludeOverloads: ?*const std.StringHashMap(std.ArrayList(OverloadEntry)), preludeStructDefs: ?*const std.StringHashMap(StructDef), preludeEnumDefs: ?*const std.StringHashMap(EnumDef), preludeGenericFns: ?*const std.StringHashMap(GenericFnDef)) !AnalyzeResult {
+pub fn analyzeWithPrelude(module: zsm.ZSModule, allocator: std.mem.Allocator, deps: *const std.StringHashMap(AnalyzeResult), preludeExports: ?*const SymbolTable, preludeOverloads: ?*const std.StringHashMap(std.ArrayList(OverloadEntry)), preludeStructDefs: ?*const std.StringHashMap(StructDef), preludeEnumDefs: ?*const std.StringHashMap(EnumDef), preludeGenericFns: ?*const std.StringHashMap(GenericFnDef), preludeScalarDefs: ?*const std.StringHashMap(Symbol.ZSType)) !AnalyzeResult {
     var errors = try std.ArrayList(AnalyzeError).initCapacity(allocator, 1);
     defer errors.deinit(allocator);
     var tableStack = try sts.create(allocator);
@@ -251,9 +291,11 @@ pub fn analyzeWithPrelude(module: zsm.ZSModule, allocator: std.mem.Allocator, de
         .allocatedTypes = try std.ArrayList(*Symbol.ZSType).initCapacity(allocator, 4),
         .allocatedSliceLists = try std.ArrayList([]const []const u8).initCapacity(allocator, 8),
         .allocatedStructFields = try std.ArrayList([]sig.ZSStructField).initCapacity(allocator, 4),
+        .allocatedFnArgs = try std.ArrayList([]sig.ZSFnArg).initCapacity(allocator, 4),
         .allocatedTypeSlices = try std.ArrayList([]const Symbol.ZSType).initCapacity(allocator, 4),
         .allocatedAstTypeSlices = try std.ArrayList([]const ast.type_notation.ZSType).initCapacity(allocator, 4),
         .allocatedAstStructFields = try std.ArrayList([]const ast.stmt.ZSStruct.ZSStructField).initCapacity(allocator, 4),
+        .scalarDefs = std.StringHashMap(Symbol.ZSType).init(allocator),
         .structDefs = std.StringHashMap(StructDef).init(allocator),
         .exportedStructDefs = std.StringHashMap(StructDef).init(allocator),
         .fieldIndices = std.AutoHashMap(usize, u32).init(allocator),
@@ -264,6 +306,7 @@ pub fn analyzeWithPrelude(module: zsm.ZSModule, allocator: std.mem.Allocator, de
         .enumInits = std.AutoHashMap(usize, EnumInitInfo).init(allocator),
         .derefTypes = std.AutoHashMap(usize, []const u8).init(allocator),
         .indexElemTypes = std.AutoHashMap(usize, []const u8).init(allocator),
+        .arrayLiteralElemTypes = std.AutoHashMap(usize, []const u8).init(allocator),
         .genericFns = std.StringHashMap(GenericFnDef).init(allocator),
         .monomorphizedFns = std.StringHashMap(void).init(allocator),
         .monomorphizedFunctions = try std.ArrayList(ast.stmt.ZSFn).initCapacity(allocator, 4),
@@ -271,8 +314,13 @@ pub fn analyzeWithPrelude(module: zsm.ZSModule, allocator: std.mem.Allocator, de
         .monomorphizedEnums = std.StringHashMap(MonomorphizedEnumDef).init(allocator),
         .matchEnumNames = std.AutoHashMap(usize, []const u8).init(allocator),
         .typeParamBindings = null,
+        .extensionFns = std.StringHashMap(std.ArrayList(OverloadEntry)).init(allocator),
+        .extensionCalls = std.AutoHashMap(usize, void).init(allocator),
+        .lambdaNames = std.AutoHashMap(usize, []const u8).init(allocator),
+        .lambdaCount = 0,
         .typeResolutionDepth = 0,
         .inLoop = false,
+        .typeAliases = std.StringHashMap(TypeAliasDef).init(allocator),
     };
 
     // Note: resolutions, overloadedNames, overloads, allocatedStrings, allocatedTypes,
@@ -284,25 +332,6 @@ pub fn analyzeWithPrelude(module: zsm.ZSModule, allocator: std.mem.Allocator, de
     defer table.deinit();
     try tableStack.enterScope(&table);
 
-    // Register built-in load_library(String): void
-    {
-        const argTypes = try allocator.alloc([]const u8, 1);
-        try analyzer.allocatedSliceLists.append(allocator, argTypes);
-        argTypes[0] = "String";
-        var entries = try std.ArrayList(OverloadEntry).initCapacity(allocator, 1);
-        try entries.append(allocator, .{
-            .argTypes = argTypes,
-            .mangledName = "load_library",
-            .retType = .unknown,
-            .external = true,
-        });
-        try analyzer.overloads.put("load_library", entries);
-    }
-
-    // Register intrinsics
-    try analyzer.registerIntrinsic(allocator, "__syscall2", &.{ "long", "long", "long" }, .long);
-    try analyzer.registerIntrinsic(allocator, "__syscall3", &.{ "number", "number", "number", "number" }, .number);
-    try analyzer.registerIntrinsic(allocator, "__syscall6", &.{ "long", "long", "long", "long", "long", "long", "long" }, .long);
     // Inject prelude exports into scope
     if (preludeExports) |exports| {
         var iter = exports.iterator();
@@ -394,6 +423,35 @@ pub fn analyzeWithPrelude(module: zsm.ZSModule, allocator: std.mem.Allocator, de
         }
     }
 
+    // Import scalar definitions from dependencies
+    {
+        var depIter4 = deps.iterator();
+        while (depIter4.next()) |dep| {
+            var scIter = dep.value_ptr.scalarDefs.iterator();
+            while (scIter.next()) |entry| {
+                if (!analyzer.scalarDefs.contains(entry.key_ptr.*)) {
+                    try analyzer.scalarDefs.put(entry.key_ptr.*, entry.value_ptr.*);
+                }
+            }
+        }
+    }
+
+    // Import prelude scalar definitions
+    if (preludeScalarDefs) |psc| {
+        var scIter = psc.iterator();
+        while (scIter.next()) |entry| {
+            if (!analyzer.scalarDefs.contains(entry.key_ptr.*)) {
+                try analyzer.scalarDefs.put(entry.key_ptr.*, entry.value_ptr.*);
+            }
+        }
+    }
+
+    // Pre-pass: register all type aliases
+    try analyzer.registerTypeAliases(module);
+
+    // Pre-pass: register all scalar declarations
+    try analyzer.registerScalars(module);
+
     // Pre-pass: register all struct definitions
     try analyzer.registerStructs(module);
 
@@ -412,10 +470,18 @@ pub fn analyzeWithPrelude(module: zsm.ZSModule, allocator: std.mem.Allocator, de
     }
 
     try analyzer.analyzeModule(module);
-    _ = try tableStack.exitScope();
+    const globalScope = try tableStack.exitScope();
+
+    // Copy global scope into a stable SymbolTable for hover/lookup after analysis.
+    var moduleScope = SymbolTable.init(allocator);
+    var scopeIter = globalScope.iterator();
+    while (scopeIter.next()) |entry| {
+        try moduleScope.put(entry.key_ptr.*, entry.value_ptr.*);
+    }
 
     return .{
         .exports = analyzer.exports,
+        .moduleScope = moduleScope,
         .errors = try allocator.dupe(AnalyzeError, errors.items),
         .resolutions = analyzer.resolutions,
         .overloadedNames = analyzer.overloadedNames,
@@ -424,9 +490,11 @@ pub fn analyzeWithPrelude(module: zsm.ZSModule, allocator: std.mem.Allocator, de
         .allocatedTypes = analyzer.allocatedTypes,
         .allocatedSliceLists = analyzer.allocatedSliceLists,
         .allocatedStructFields = analyzer.allocatedStructFields,
+        .allocatedFnArgs = analyzer.allocatedFnArgs,
         .allocatedTypeSlices = analyzer.allocatedTypeSlices,
         .allocatedAstTypeSlices = analyzer.allocatedAstTypeSlices,
         .allocatedAstStructFields = analyzer.allocatedAstStructFields,
+        .scalarDefs = analyzer.scalarDefs,
         .structDefs = analyzer.structDefs,
         .exportedStructDefs = analyzer.exportedStructDefs,
         .fieldIndices = analyzer.fieldIndices,
@@ -436,11 +504,16 @@ pub fn analyzeWithPrelude(module: zsm.ZSModule, allocator: std.mem.Allocator, de
         .enumInits = analyzer.enumInits,
         .derefTypes = analyzer.derefTypes,
         .indexElemTypes = analyzer.indexElemTypes,
+        .arrayLiteralElemTypes = analyzer.arrayLiteralElemTypes,
         .genericFns = analyzer.genericFns,
         .monomorphizedFunctions = analyzer.monomorphizedFunctions,
         .structInitResolutions = analyzer.structInitResolutions,
         .monomorphizedEnums = analyzer.monomorphizedEnums,
         .matchEnumNames = analyzer.matchEnumNames,
+        .extensionFns = analyzer.extensionFns,
+        .extensionCalls = analyzer.extensionCalls,
+        .lambdaNames = analyzer.lambdaNames,
+        .typeAliases = analyzer.typeAliases,
     };
 }
 
@@ -460,6 +533,25 @@ fn registerIntrinsic(self: *Self, allocator: std.mem.Allocator, name: []const u8
     try self.overloads.put(name, entries);
 }
 
+fn registerTypeAliases(self: *Self, module: zsm.ZSModule) !void {
+    for (module.ast) |node| {
+        switch (node) {
+            .stmt => {
+                switch (node.stmt) {
+                    .type_alias => |ta| {
+                        try self.typeAliases.put(ta.name, .{
+                            .type_params = ta.type_params,
+                            .aliased_type = ta.aliased_type,
+                        });
+                    },
+                    else => {},
+                }
+            },
+            .import_decl, .export_from, .expr, .use_decl, .when_decl, .target_decl => {},
+        }
+    }
+}
+
 fn registerFunctions(self: *Self, module: zsm.ZSModule) !void {
     for (module.ast) |node| {
         switch (node) {
@@ -471,7 +563,7 @@ fn registerFunctions(self: *Self, module: zsm.ZSModule) !void {
                     else => {},
                 }
             },
-            .import_decl, .export_from, .expr, .use_decl => {},
+            .import_decl, .export_from, .expr, .use_decl, .when_decl, .target_decl => {},
         }
     }
 }
@@ -482,6 +574,43 @@ fn registerFunction(self: *Self, func: ast.stmt.ZSFn) !void {
         try self.genericFns.put(func.name, .{
             .func = func,
             .type_params = func.type_params,
+        });
+        return;
+    }
+
+    // If this function has a receiver type, register as extension function
+    if (func.receiver_type) |receiver| {
+        const key = try std.fmt.allocPrint(self.allocator, "{s}.{s}", .{ receiver, func.name });
+        try self.allocatedStrings.append(self.allocator, key);
+
+        // Build argTypes including receiver as first argument
+        const argTypes = try self.allocator.alloc([]const u8, func.args.len + 1);
+        try self.allocatedSliceLists.append(self.allocator, argTypes);
+        argTypes[0] = receiver; // receiver type as first arg
+        for (func.args, 0..) |arg, i| {
+            argTypes[i + 1] = if (arg.type) |t| t.typeName() else "unknown";
+        }
+
+        const external = func.modifiers.external != null;
+        const mangledName = if (external)
+            func.name
+        else blk: {
+            const mname = try computeMangledName(self.allocator, key, argTypes[1..]);
+            try self.allocatedStrings.append(self.allocator, mname);
+            break :blk mname;
+        };
+
+        const retType = if (func.ret) |r| try self.resolveTypeAnnotationFull(r) else Symbol.ZSType.unknown;
+
+        const gop = try self.extensionFns.getOrPut(key);
+        if (!gop.found_existing) {
+            gop.value_ptr.* = try std.ArrayList(OverloadEntry).initCapacity(self.allocator, 2);
+        }
+        try gop.value_ptr.append(self.allocator, .{
+            .argTypes = argTypes[1..],
+            .mangledName = mangledName,
+            .retType = retType,
+            .external = external,
         });
         return;
     }
@@ -539,31 +668,6 @@ fn registerFunction(self: *Self, func: ast.stmt.ZSFn) !void {
     }
 }
 
-fn resolveTypeAnnotation(ret: ?ast.ZSType) Symbol.ZSType {
-    if (ret) |r| {
-        return resolveTypeInner(r);
-    }
-    return .unknown;
-}
-
-fn resolveTypeInner(r: ast.ZSType) Symbol.ZSType {
-    switch (r) {
-        .array => return .unknown, // array types need full resolution
-        .reference, .generic => {},
-    }
-    const name = r.typeName();
-    if (std.mem.eql(u8, name, "number")) return .number;
-    if (std.mem.eql(u8, name, "int")) return .number;
-    if (std.mem.eql(u8, name, "long")) return .long;
-    if (std.mem.eql(u8, name, "short")) return .short;
-    if (std.mem.eql(u8, name, "byte")) return .byte;
-    if (std.mem.eql(u8, name, "boolean")) return .boolean;
-    if (std.mem.eql(u8, name, "char")) return .char;
-    // Note: Pointer<T>, String, and other struct types are resolved
-    // during analysis with access to structDefs (see resolveTypeAnnotationFull)
-    return .unknown;
-}
-
 fn analyzeModule(self: *Self, module: zsm.ZSModule) !void {
     for (module.ast) |node| {
         if (try self.analyzeNode(node)) |symbol| {
@@ -588,6 +692,7 @@ fn analyzeNode(self: *Self, node: ast.ZSAstNode) !?Symbol {
             try self.analyzeUse(node.use_decl);
             break :b null;
         },
+        .when_decl, .target_decl => null, // consumed by preprocessor
     };
 }
 
@@ -611,6 +716,22 @@ fn analyzeImport(self: *Self, imp: ast.ZSImport) !?Symbol {
                 // Import an exported struct definition
                 if (!self.structDefs.contains(localName)) {
                     try self.structDefs.put(localName, sd);
+                }
+            } else if (depResult.genericFns.get(sym.name)) |gfn| {
+                // Import a generic function definition
+                if (!self.genericFns.contains(localName)) {
+                    try self.genericFns.put(localName, gfn);
+                }
+                // Also put a placeholder in scope so references resolve
+                try self.tableStack.put(.{ .name = localName, .assignable = false, .signature = .unknown });
+            } else if (depResult.overloads.get(sym.name)) |entries| {
+                // Import overloaded function
+                const gop = try self.overloads.getOrPut(localName);
+                if (!gop.found_existing) {
+                    gop.value_ptr.* = try std.ArrayList(OverloadEntry).initCapacity(self.allocator, 2);
+                }
+                for (entries.items) |ov| {
+                    try gop.value_ptr.append(self.allocator, ov);
                 }
             } else {
                 try self.recordErrorAt(imp.startPos, imp.endPos, "Imported symbol not found in module");
@@ -687,6 +808,29 @@ fn analyzeStmt(self: *Self, stmt: ast.stmt.ZSStmt) !?Symbol {
             // Enum definitions are handled in the pre-pass (registerEnums)
             return null;
         },
+        .scalar_decl => {
+            // Scalar declarations are handled in the pre-pass (registerScalars)
+            return null;
+        },
+        .type_alias => {
+            // Type aliases are handled in the pre-pass (registerTypeAliases)
+            return null;
+        },
+        .asm_block => |ab| {
+            // Analyze input expressions
+            for (ab.inputs) |inp| {
+                _ = try self.analyzeExpr(inp.expr);
+            }
+            // Declare output variables in enclosing scope
+            for (ab.outputs) |out| {
+                try self.tableStack.put(.{
+                    .name = out.name,
+                    .assignable = true,
+                    .signature = Symbol.ZSType.number,
+                });
+            }
+            return null;
+        },
     };
 }
 
@@ -713,7 +857,45 @@ fn analyzeExpr(self: *Self, expr: ast.expr.ZSExpr) !Symbol.ZSType {
         .index_access => self.analyzeIndexAccess(expr.index_access),
         .enum_init => self.analyzeEnumInit(expr.enum_init),
         .match_expr => self.analyzeMatchExpr(expr.match_expr),
+        .lambda => self.analyzeLambda(expr.lambda),
     };
+}
+
+fn analyzeLambda(self: *Self, lambda: ast.expr.ZSLambda) Error!Symbol.ZSType {
+    // Generate a name for this lambda
+    const lambdaName = try std.fmt.allocPrint(self.allocator, "__lambda_{d}", .{self.lambdaCount});
+    self.lambdaCount += 1;
+    try self.allocatedStrings.append(self.allocator, lambdaName);
+    try self.lambdaNames.put(lambda.startPos, lambdaName);
+
+    // Analyze the lambda body in a new scope with params as symbols
+    var scope = SymbolTable.init(self.allocator);
+    defer scope.deinit();
+    try self.tableStack.enterScope(&scope);
+
+    for (lambda.params) |param| {
+        try self.tableStack.put(.{
+            .name = param.name,
+            .assignable = true,
+            .signature = Symbol.ZSType.unknown,
+        });
+    }
+
+    const retType = try self.analyzeExpr(lambda.body.*);
+    _ = try self.tableStack.exitScope();
+
+    // Build function type
+    const retPtr = try self.allocator.create(Symbol.ZSType);
+    retPtr.* = retType;
+    try self.allocatedTypes.append(self.allocator, retPtr);
+
+    const args = try self.allocator.alloc(sig.ZSFnArg, lambda.params.len);
+    try self.allocatedFnArgs.append(self.allocator, args);
+    for (lambda.params, 0..) |param, i| {
+        args[i] = .{ .name = param.name, .type = Symbol.ZSType.unknown };
+    }
+
+    return Symbol.ZSType{ .function = .{ .ret = retPtr, .args = args } };
 }
 
 fn analyzeVariable(self: *Self, variable: ast.stmt.ZSVar) !Symbol {
@@ -774,6 +956,11 @@ fn analyzeReassign(self: *Self, reassign: ast.stmt.ZSReassign) !void {
                     .pointer => |pt| {
                         try self.indexElemTypes.put(idx.startPos, typeToString(pt.*));
                     },
+                    .struct_type => |st| {
+                        if (std.mem.eql(u8, st.name, "Pointer") and st.type_args.len > 0) {
+                            try self.indexElemTypes.put(idx.startPos, typeToString(st.type_args[0]));
+                        }
+                    },
                     else => {},
                 }
             } else {
@@ -827,7 +1014,7 @@ fn analyzeFunction(self: *Self, function: ast.stmt.ZSFn) !Symbol {
         };
     }
 
-    const retType = resolveTypeAnnotation(function.ret);
+    const retType = if (function.ret) |r| try self.resolveTypeAnnotationFull(r) else Symbol.ZSType.unknown;
     const args = try self.analyzeFnArgs(function.args);
 
     // Heap-allocate the return type to avoid dangling pointer
@@ -839,6 +1026,26 @@ fn analyzeFunction(self: *Self, function: ast.stmt.ZSFn) !Symbol {
         var scope = SymbolTable.init(self.allocator);
         defer scope.deinit();
         try self.tableStack.enterScope(&scope);
+        const savedFnReturnType = self.currentFnReturnType;
+        self.currentFnReturnType = retType;
+        defer self.currentFnReturnType = savedFnReturnType;
+        // Inject 'this' for extension functions
+        if (function.receiver_type) |_| {
+            const thisType: Symbol.ZSType = if (self.structDefs.get(function.receiver_type.?)) |sd| blk: {
+                const fields = try self.allocator.alloc(sig.ZSStructField, sd.fields.len);
+                try self.allocatedStructFields.append(self.allocator, fields);
+                for (sd.fields, 0..) |f, i| {
+                    const ft = try self.resolveTypeAnnotationFull(f.type);
+                    fields[i] = .{ .name = f.name, .type = ft };
+                }
+                break :blk Symbol.ZSType{ .struct_type = .{ .name = sd.name, .fields = fields, .type_args = &.{} } };
+            } else Symbol.ZSType.unknown;
+            try self.tableStack.put(.{
+                .name = "this",
+                .assignable = false,
+                .signature = thisType,
+            });
+        }
         // Add args as symbols in the function scope
         for (function.args) |arg| {
             const argType = if (arg.type) |t| try self.resolveTypeAnnotationFull(t) else Symbol.ZSType.unknown;
@@ -868,10 +1075,6 @@ fn analyzeFunction(self: *Self, function: ast.stmt.ZSFn) !Symbol {
     return sym;
 }
 
-fn analyzeType(self: *Self, ret: *const ?ast.ZSType) !Symbol.ZSType {
-    _ = self;
-    return resolveTypeAnnotation(ret.*);
-}
 
 fn analyzeBuiltin(self: *Self, builtin: ast.ZSBuiltin) !Symbol.ZSType {
     _ = self;
@@ -881,10 +1084,13 @@ fn analyzeBuiltin(self: *Self, builtin: ast.ZSBuiltin) !Symbol.ZSType {
 }
 
 fn analyzeFnArgs(self: *Self, args: []ast.stmt.ZSFn.Arg) ![]Symbol.sig.ZSFnArg {
-    _ = self;
-    _ = args;
-
-    return &[_]Symbol.sig.ZSFnArg{};
+    const result = try self.allocator.alloc(Symbol.sig.ZSFnArg, args.len);
+    try self.allocatedFnArgs.append(self.allocator, result);
+    for (args, 0..) |arg, i| {
+        const argType = if (arg.type) |t| try self.resolveTypeAnnotationFull(t) else Symbol.ZSType.unknown;
+        result[i] = .{ .name = arg.name, .type = argType };
+    }
+    return result;
 }
 
 fn analyzeCall(self: *Self, call: ast.expr.ZSCall) Error!Symbol.ZSType {
@@ -925,17 +1131,7 @@ fn analyzeCall(self: *Self, call: ast.expr.ZSCall) Error!Symbol.ZSType {
             try self.derefTypes.put(call.startPos, typeToString(resultType));
             return resultType;
         }
-        if (std.mem.eql(u8, name, "alloc")) {
-            if (call.arguments.len != 1) {
-                try self.recordError(call, "alloc() expects exactly 1 argument");
-                return Symbol.ZSType.unknown;
-            }
-            _ = try self.analyzeExpr(call.arguments[0]);
-            const innerPtr = try self.allocator.create(Symbol.ZSType);
-            innerPtr.* = Symbol.ZSType.number;
-            try self.allocatedTypes.append(self.allocator, innerPtr);
-            return Symbol.ZSType{ .pointer = innerPtr };
-        }
+
         if (std.mem.eql(u8, name, "free")) {
             if (call.arguments.len != 2) {
                 try self.recordError(call, "free() expects exactly 2 arguments");
@@ -947,6 +1143,58 @@ fn analyzeCall(self: *Self, call: ast.expr.ZSCall) Error!Symbol.ZSType {
                 try self.recordError(call, "free() first argument must be a pointer");
             }
             return Symbol.ZSType.unknown;
+        }
+    }
+
+    // Handle extension function calls: expr.method(args)
+    if (subject == .field_access) {
+        const fa = subject.field_access;
+        const receiverType = try self.analyzeExpr(fa.subject.*);
+        const receiverTypeName = typeToString(receiverType);
+        const key = try std.fmt.allocPrint(self.allocator, "{s}.{s}", .{ receiverTypeName, fa.field });
+        defer self.allocator.free(key);
+
+        if (self.extensionFns.get(key)) |entries| {
+            // Analyze arguments
+            const extArgTypes = try self.allocator.alloc([]const u8, call.arguments.len);
+            defer self.allocator.free(extArgTypes);
+            for (call.arguments, 0..) |arg, i| {
+                const argType = try self.analyzeExpr(arg);
+                extArgTypes[i] = typeToString(argType);
+            }
+
+            // Find matching overload (args don't include receiver)
+            var matched: ?OverloadEntry = null;
+            for (entries.items) |entry| {
+                if (entry.argTypes.len == extArgTypes.len) {
+                    if (entry.external) {
+                        matched = entry;
+                        break;
+                    }
+                    var allMatch = true;
+                    for (entry.argTypes, extArgTypes) |a, b| {
+                        if (!std.mem.eql(u8, a, b)) {
+                            if (!(isNumericType(a) and isNumericType(b))) {
+                                allMatch = false;
+                                break;
+                            }
+                        }
+                    }
+                    if (allMatch) {
+                        matched = entry;
+                        break;
+                    }
+                }
+            }
+
+            if (matched) |entry| {
+                try self.resolutions.put(call.startPos, entry.mangledName);
+                try self.extensionCalls.put(call.startPos, {});
+                return entry.retType;
+            } else {
+                try self.recordError(call, "No matching extension function overload");
+                return Symbol.ZSType.unknown;
+            }
         }
     }
 
@@ -966,6 +1214,11 @@ fn analyzeCall(self: *Self, call: ast.expr.ZSCall) Error!Symbol.ZSType {
             var matched: ?OverloadEntry = null;
             for (entries.items) |entry| {
                 if (entry.argTypes.len == argTypes.len) {
+                    // External (built-in) functions accept any argument types
+                    if (entry.external) {
+                        matched = entry;
+                        break;
+                    }
                     var allMatch = true;
                     for (entry.argTypes, argTypes) |a, b| {
                         if (!std.mem.eql(u8, a, b)) {
@@ -1044,7 +1297,12 @@ fn analyzeIfExpr(self: *Self, ifExpr: ast.expr.ZSIfExpr) Error!Symbol.ZSType {
     _ = try self.analyzeExpr(ifExpr.condition.*);
     const thenType = try self.analyzeExpr(ifExpr.then_branch.*);
     if (ifExpr.else_branch) |eb| {
-        _ = try self.analyzeExpr(eb.*);
+        const elseType = try self.analyzeExpr(eb.*);
+        if (thenType != .unknown and elseType != .unknown and
+            !typesCompatible(thenType, elseType) and !typesCompatible(elseType, thenType))
+        {
+            try self.recordError(ifExpr, "if/else branches have incompatible types");
+        }
     }
     return thenType;
 }
@@ -1096,17 +1354,70 @@ fn analyzeUnary(self: *Self, unary: ast.expr.ZSUnary) Error!Symbol.ZSType {
     return Symbol.ZSType.boolean;
 }
 
+fn isArithmeticType(t: Symbol.ZSType) bool {
+    return switch (t) {
+        .number, .long, .short, .byte, .char => true,
+        else => false,
+    };
+}
+
 fn analyzeBinary(self: *Self, binary: ast.expr.ZSBinary) Error!Symbol.ZSType {
-    _ = try self.analyzeExpr(binary.lhs.*);
-    _ = try self.analyzeExpr(binary.rhs.*);
+    const lhsType = try self.analyzeExpr(binary.lhs.*);
+    const rhsType = try self.analyzeExpr(binary.rhs.*);
     const op = binary.op;
-    // Comparison and logical operators return boolean
-    if (std.mem.eql(u8, op, "==") or std.mem.eql(u8, op, "!=") or
-        std.mem.eql(u8, op, ">") or std.mem.eql(u8, op, "<") or
-        std.mem.eql(u8, op, ">=") or std.mem.eql(u8, op, "<=") or
-        std.mem.eql(u8, op, "&&") or std.mem.eql(u8, op, "||"))
+
+    const isArith = std.mem.eql(u8, op, "+") or std.mem.eql(u8, op, "-") or
+                    std.mem.eql(u8, op, "*") or std.mem.eql(u8, op, "/") or
+                    std.mem.eql(u8, op, "%");
+    const isLogical = std.mem.eql(u8, op, "&&") or std.mem.eql(u8, op, "||");
+    const isOrdered = std.mem.eql(u8, op, "<") or std.mem.eql(u8, op, ">") or
+                      std.mem.eql(u8, op, "<=") or std.mem.eql(u8, op, ">=");
+    const isEquality = std.mem.eql(u8, op, "==") or std.mem.eql(u8, op, "!=");
+
+    // Arithmetic: both operands must be numeric (pointer arithmetic is exempt)
+    if (isArith and lhsType != .pointer and
+        !(lhsType == .struct_type and std.mem.eql(u8, lhsType.struct_type.name, "Pointer")))
     {
+        if (lhsType != .unknown and !isArithmeticType(lhsType))
+            try self.recordError(binary, "left operand of arithmetic operator must be numeric");
+        if (rhsType != .unknown and !isArithmeticType(rhsType))
+            try self.recordError(binary, "right operand of arithmetic operator must be numeric");
+    }
+
+    // Logical: both must be boolean
+    if (isLogical) {
+        if (lhsType != .unknown and lhsType != .boolean)
+            try self.recordError(binary, "left operand of logical operator must be boolean");
+        if (rhsType != .unknown and rhsType != .boolean)
+            try self.recordError(binary, "right operand of logical operator must be boolean");
         return Symbol.ZSType.boolean;
+    }
+
+    // Ordered comparison: both must be numeric
+    if (isOrdered) {
+        if (lhsType != .unknown and !isArithmeticType(lhsType))
+            try self.recordError(binary, "left operand of comparison must be numeric");
+        if (rhsType != .unknown and !isArithmeticType(rhsType))
+            try self.recordError(binary, "right operand of comparison must be numeric");
+        return Symbol.ZSType.boolean;
+    }
+
+    // Equality: operands must be type-compatible
+    if (isEquality) {
+        if (lhsType != .unknown and rhsType != .unknown and
+            !typesCompatible(lhsType, rhsType) and !typesCompatible(rhsType, lhsType))
+        {
+            try self.recordError(binary, "equality operands have incompatible types");
+        }
+        return Symbol.ZSType.boolean;
+    }
+
+    // Pointer arithmetic: Pointer<T> + number → Pointer<T>
+    if (lhsType == .pointer) {
+        return lhsType;
+    }
+    if (lhsType == .struct_type and std.mem.eql(u8, lhsType.struct_type.name, "Pointer")) {
+        return lhsType;
     }
     // Arithmetic operators return number
     return Symbol.ZSType.number;
@@ -1139,6 +1450,9 @@ fn analyzeBlock(self: *Self, block: ast.expr.ZSBlock) Error!Symbol.ZSType {
                 try self.analyzeUse(node.use_decl);
                 lastType = .unknown;
             },
+            .when_decl, .target_decl => {
+                lastType = .unknown;
+            },
         }
     }
 
@@ -1148,9 +1462,50 @@ fn analyzeBlock(self: *Self, block: ast.expr.ZSBlock) Error!Symbol.ZSType {
 
 fn analyzeReturn(self: *Self, ret: ast.expr.ZSReturn) Error!Symbol.ZSType {
     if (ret.value) |v| {
-        return try self.analyzeExpr(v.*);
+        const savedExpected = self.expectedType;
+        if (self.currentFnReturnType) |rt| {
+            self.expectedType = rt;
+        }
+        const result = try self.analyzeExpr(v.*);
+        self.expectedType = savedExpected;
+        return result;
     }
     return .unknown;
+}
+
+const builtinScalars = .{
+    .{ "number", Symbol.ZSType.number },
+    .{ "int", Symbol.ZSType.number },
+    .{ "long", Symbol.ZSType.long },
+    .{ "short", Symbol.ZSType.short },
+    .{ "byte", Symbol.ZSType.byte },
+    .{ "boolean", Symbol.ZSType.boolean },
+    .{ "char", Symbol.ZSType.char },
+};
+
+fn registerScalars(self: *Self, module: zsm.ZSModule) !void {
+    for (module.ast) |node| {
+        switch (node) {
+            .stmt => {
+                switch (node.stmt) {
+                    .scalar_decl => |sd| {
+                        var found = false;
+                        inline for (builtinScalars) |entry| {
+                            if (std.mem.eql(u8, sd.name, entry[0])) {
+                                try self.scalarDefs.put(sd.name, entry[1]);
+                                found = true;
+                            }
+                        }
+                        if (!found) {
+                            try self.recordErrorAt(sd.startPos, sd.startPos + sd.name.len, "Unknown scalar type");
+                        }
+                    },
+                    else => {},
+                }
+            },
+            else => {},
+        }
+    }
 }
 
 fn registerStructs(self: *Self, module: zsm.ZSModule) !void {
@@ -1172,7 +1527,7 @@ fn registerStructs(self: *Self, module: zsm.ZSModule) !void {
                     else => {},
                 }
             },
-            .import_decl, .export_from, .expr, .use_decl => {},
+            .import_decl, .export_from, .expr, .use_decl, .when_decl, .target_decl => {},
         }
     }
 }
@@ -1185,13 +1540,8 @@ fn resolveTypeAnnotationFull(self: *Self, astType: ast.ZSType) Error!Symbol.ZSTy
 
     switch (astType) {
         .reference => |ref| {
-            if (std.mem.eql(u8, ref, "number")) return .number;
-            if (std.mem.eql(u8, ref, "int")) return .number;
-            if (std.mem.eql(u8, ref, "long")) return .long;
-            if (std.mem.eql(u8, ref, "short")) return .short;
-            if (std.mem.eql(u8, ref, "byte")) return .byte;
-            if (std.mem.eql(u8, ref, "boolean")) return .boolean;
-            if (std.mem.eql(u8, ref, "char")) return .char;
+            // Scalar types registered from stdlib scalar declarations
+            if (self.scalarDefs.get(ref)) |t| return t;
             // Check if it's a known struct type (non-generic)
             if (self.structDefs.get(ref)) |sd| {
                 if (sd.type_params.len == 0) {
@@ -1212,6 +1562,12 @@ fn resolveTypeAnnotationFull(self: *Self, astType: ast.ZSType) Error!Symbol.ZSTy
                     }
                 }
             }
+            // Check type aliases
+            if (self.typeAliases.get(ref)) |alias| {
+                if (alias.type_params.len == 0) {
+                    return try self.resolveTypeAnnotationFull(alias.aliased_type);
+                }
+            }
             return .unknown;
         },
         .array => |a| {
@@ -1221,9 +1577,32 @@ fn resolveTypeAnnotationFull(self: *Self, astType: ast.ZSType) Error!Symbol.ZSTy
             try self.allocatedTypes.append(self.allocator, elemPtr);
             return Symbol.ZSType{ .array_type = .{ .element_type = elemPtr, .size = 0 } };
         },
+        .fn_type => |ft| {
+            const retType = try self.resolveTypeAnnotationFull(ft.return_type.*);
+            const retPtr = try self.allocator.create(Symbol.ZSType);
+            retPtr.* = retType;
+            try self.allocatedTypes.append(self.allocator, retPtr);
+            const args = try self.allocator.alloc(sig.ZSFnArg, ft.param_types.len);
+            try self.allocatedFnArgs.append(self.allocator, args);
+            for (ft.param_types, 0..) |pt, i| {
+                args[i] = .{ .name = "", .type = try self.resolveTypeAnnotationFull(pt) };
+            }
+            return Symbol.ZSType{ .function = .{ .ret = retPtr, .args = args } };
+        },
         .generic => |g| {
-            if (std.mem.eql(u8, g.name, "Pointer")) {
-                return .long;
+            // Check type aliases for generic types
+            if (self.typeAliases.get(g.name)) |alias| {
+                if (alias.type_params.len == g.type_args.len) {
+                    return try self.resolveTypeAnnotationFull(alias.aliased_type);
+                }
+            }
+            // Pointer<T> is represented as ZSType.pointer, not as a struct
+            if (std.mem.eql(u8, g.name, "Pointer") and g.type_args.len == 1) {
+                const innerType = try self.resolveTypeAnnotationFull(g.type_args[0]);
+                const innerPtr = try self.allocator.create(Symbol.ZSType);
+                innerPtr.* = innerType;
+                try self.allocatedTypes.append(self.allocator, innerPtr);
+                return Symbol.ZSType{ .pointer = innerPtr };
             }
             // Check for generic struct
             if (self.structDefs.get(g.name)) |sd| {
@@ -1279,7 +1658,7 @@ fn resolveFieldType(self: *Self, fieldAstType: ast.type_notation.ZSType, typePar
             // Otherwise resolve normally
             return try self.resolveTypeAnnotationFull(fieldAstType);
         },
-        .generic, .array => {
+        .generic, .array, .fn_type => {
             return try self.resolveTypeAnnotationFull(fieldAstType);
         },
     }
@@ -1291,7 +1670,7 @@ fn getStringStructType(self: *Self) !Symbol.ZSType {
         const resolvedFields = try self.allocator.alloc(sig.ZSStructField, sd.fields.len);
         try self.allocatedStructFields.append(self.allocator, resolvedFields);
         for (sd.fields, 0..) |field, i| {
-            const fieldType = resolveTypeInner(field.type);
+            const fieldType = try self.resolveFieldType(field.type, sd.type_params, &.{});
             resolvedFields[i] = .{ .name = field.name, .type = fieldType };
         }
         return Symbol.ZSType{ .struct_type = .{
@@ -1441,11 +1820,17 @@ fn analyzeStructInit(self: *Self, si: ast.expr.ZSStructInit) Error!Symbol.ZSType
 fn analyzeArrayLiteral(self: *Self, al: ast.expr.ZSArrayLiteral) Error!Symbol.ZSType {
     var elemType: Symbol.ZSType = .unknown;
     for (al.elements) |elem| {
-        elemType = try self.analyzeExpr(elem);
+        const t = try self.analyzeExpr(elem);
+        if (elemType == .unknown) {
+            elemType = t;
+        } else if (t != .unknown and !typesCompatible(elemType, t)) {
+            try self.recordErrorAt(elem.start(), elem.end(), "Array elements must have a consistent type");
+        }
     }
     const elemPtr = try self.allocator.create(Symbol.ZSType);
     elemPtr.* = elemType;
     try self.allocatedTypes.append(self.allocator, elemPtr);
+    try self.arrayLiteralElemTypes.put(al.startPos, typeToString(elemType));
     return Symbol.ZSType{ .array_type = .{ .element_type = elemPtr, .size = al.elements.len } };
 }
 
@@ -1457,6 +1842,16 @@ fn analyzeIndexAccess(self: *Self, ia: ast.expr.ZSIndexAccess) Error!Symbol.ZSTy
         .pointer => |pt| {
             try self.indexElemTypes.put(ia.startPos, typeToString(pt.*));
             return pt.*;
+        },
+        .struct_type => |st| blk: {
+            // Pointer<T> structs support index access, returning T
+            if (std.mem.eql(u8, st.name, "Pointer") and st.type_args.len > 0) {
+                const elemType = st.type_args[0];
+                try self.indexElemTypes.put(ia.startPos, typeToString(elemType));
+                break :blk elemType;
+            }
+            try self.recordError(ia, "Index access on non-array type");
+            break :blk Symbol.ZSType.unknown;
         },
         .long => .char,
         else => blk: {
@@ -1553,7 +1948,7 @@ fn registerEnums(self: *Self, module: zsm.ZSModule) !void {
                     else => {},
                 }
             },
-            .import_decl, .export_from, .expr, .use_decl => {},
+            .import_decl, .export_from, .expr, .use_decl, .when_decl, .target_decl => {},
         }
     }
 }
@@ -1756,8 +2151,11 @@ fn analyzeMatchExpr(self: *Self, me: ast.expr.ZSMatchExpr) Error!Symbol.ZSType {
     const subjectType = try self.analyzeExpr(me.subject.*);
 
     // For enum patterns, subject must be an enum type
-    const isEnumMatch = me.arms.len > 0 and me.arms[0].pattern == .enum_variant;
-    if (isEnumMatch and subjectType != .enum_type) {
+    var hasEnumArm = false;
+    for (me.arms) |arm| {
+        if (arm.pattern == .enum_variant) { hasEnumArm = true; break; }
+    }
+    if (hasEnumArm and subjectType != .enum_type) {
         try self.recordError(me, "Match subject must be an enum type for enum patterns");
         return Symbol.ZSType.unknown;
     }
@@ -1770,6 +2168,22 @@ fn analyzeMatchExpr(self: *Self, me: ast.expr.ZSMatchExpr) Error!Symbol.ZSType {
     if (enumType.type_args.len > 0) {
         const mangledName = try self.computeEnumMangledName(enumType.name, enumType.type_args);
         try self.matchEnumNames.put(me.startPos, mangledName);
+        // Ensure the monomorphized enum is registered in this module's context.
+        // It may have been instantiated in an imported module and not carried over.
+        if (!self.monomorphizedEnums.contains(mangledName)) {
+            if (self.enumDefs.get(enumType.name)) |ed| {
+                _ = try self.instantiateEnumFromResolved(ed, enumType.type_args);
+            } else if (enumTypeOpt) |et| {
+                // Cross-module generic enum: enumDefs doesn't have it, but the resolved
+                // type already carries the concrete variants with correct tags.
+                const monoMangledName = try self.allocator.dupe(u8, mangledName);
+                try self.allocatedStrings.append(self.allocator, monoMangledName);
+                try self.monomorphizedEnums.put(monoMangledName, .{
+                    .mangledName = monoMangledName,
+                    .variants = et.variants,
+                });
+            }
+        }
     } else {
         try self.matchEnumNames.put(me.startPos, enumType.name);
     }
@@ -1817,7 +2231,7 @@ fn analyzeMatchExpr(self: *Self, me: ast.expr.ZSMatchExpr) Error!Symbol.ZSType {
                 if (subjectType == .struct_type) {
                     const st = subjectType.struct_type;
                     for (sd.fields) |fp| {
-                        var fieldType = Symbol.ZSType.unknown;
+                        var fieldType: Symbol.ZSType = .unknown;
                         for (st.fields) |sf| {
                             if (std.mem.eql(u8, sf.name, fp.name)) {
                                 fieldType = sf.type;
@@ -1841,6 +2255,11 @@ fn analyzeMatchExpr(self: *Self, me: ast.expr.ZSMatchExpr) Error!Symbol.ZSType {
 
         if (resultType == .unknown) {
             resultType = armType;
+        } else if (armType != .unknown and
+                   !typesCompatible(resultType, armType) and
+                   !typesCompatible(armType, resultType))
+        {
+            try self.recordError(me, "match arms have incompatible return types");
         }
     }
 
@@ -1848,7 +2267,14 @@ fn analyzeMatchExpr(self: *Self, me: ast.expr.ZSMatchExpr) Error!Symbol.ZSType {
     if (me.has_else) {
         if (me.else_body) |eb| {
             const elseType = try self.analyzeExpr(eb.*);
-            if (resultType == .unknown) resultType = elseType;
+            if (resultType == .unknown) {
+                resultType = elseType;
+            } else if (elseType != .unknown and
+                       !typesCompatible(resultType, elseType) and
+                       !typesCompatible(elseType, resultType))
+            {
+                try self.recordError(me, "else branch type is incompatible with match arms");
+            }
         }
     } else {
         // Exhaustiveness check: all variants must be covered (only when no else)
@@ -1992,6 +2418,8 @@ fn monomorphizeFunction(self: *Self, gfn: GenericFnDef, bindings: []const []cons
 
     return ast.stmt.ZSFn{
         .name = mangledName,
+        .receiver_type = null,
+        .receiver_type_params = &.{},
         .type_params = &.{},
         .args = newArgs,
         .ret = newRet,
@@ -2024,6 +2452,16 @@ fn substituteAstType(self: *Self, t: ast.ZSType, typeParams: []const []const u8,
             const newElem = try self.allocator.create(ast.type_notation.ZSType);
             newElem.* = try self.substituteAstType(a.element_type.*, typeParams, bindings);
             return ast.ZSType{ .array = .{ .element_type = newElem } };
+        },
+        .fn_type => |ft| {
+            const newParamTypes = try self.allocator.alloc(ast.type_notation.ZSType, ft.param_types.len);
+            try self.allocatedAstTypeSlices.append(self.allocator, newParamTypes);
+            for (ft.param_types, 0..) |pt, i| {
+                newParamTypes[i] = try self.substituteAstType(pt, typeParams, bindings);
+            }
+            const newRetType = try self.allocator.create(ast.type_notation.ZSType);
+            newRetType.* = try self.substituteAstType(ft.return_type.*, typeParams, bindings);
+            return ast.ZSType{ .fn_type = .{ .param_types = newParamTypes, .return_type = newRetType } };
         },
     }
 }

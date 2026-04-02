@@ -1,0 +1,458 @@
+{
+  "version": "1.0.0",
+  "lastScanned": 1775071798789,
+  "projectRoot": "/home/nektom/IdeaProjects/ZenScript",
+  "techStack": {
+    "languages": [
+      {
+        "name": "JavaScript/TypeScript",
+        "version": null,
+        "confidence": "high",
+        "markers": [
+          "package.json"
+        ]
+      }
+    ],
+    "frameworks": [],
+    "packageManager": "npm",
+    "runtime": null
+  },
+  "build": {
+    "buildCommand": "npm run build",
+    "testCommand": "npm test",
+    "lintCommand": null,
+    "devCommand": null,
+    "scripts": {
+      "test": "node index.js",
+      "build": "node build.js"
+    }
+  },
+  "conventions": {
+    "namingStyle": null,
+    "importStyle": null,
+    "testPattern": null,
+    "fileOrganization": null
+  },
+  "structure": {
+    "isMonorepo": true,
+    "workspaces": [
+      "packages/vite-plugin"
+    ],
+    "mainDirectories": [
+      "examples",
+      "src"
+    ],
+    "gitBranches": null
+  },
+  "customNotes": [],
+  "directoryMap": {
+    "examples": {
+      "path": "examples",
+      "purpose": "Example code",
+      "fileCount": 15,
+      "lastAccessed": 1775071798776,
+      "keyFiles": [
+        "alloc_test.zs",
+        "arraylist_test.zs",
+        "break_test.zs",
+        "combined_test.zs",
+        "deref_test.zs"
+      ]
+    },
+    "intellij-plugin": {
+      "path": "intellij-plugin",
+      "purpose": null,
+      "fileCount": 5,
+      "lastAccessed": 1775071798777,
+      "keyFiles": [
+        "build.gradle.kts",
+        "gradle.properties",
+        "gradlew",
+        "gradlew.bat",
+        "settings.gradle.kts"
+      ]
+    },
+    "packages": {
+      "path": "packages",
+      "purpose": null,
+      "fileCount": 0,
+      "lastAccessed": 1775071798782,
+      "keyFiles": []
+    },
+    "src": {
+      "path": "src",
+      "purpose": "Source code",
+      "fileCount": 6,
+      "lastAccessed": 1775071798785,
+      "keyFiles": [
+        "daemon_api.zig",
+        "main.zig",
+        "nodemodule.zig",
+        "parser.zig",
+        "pipeline.zig"
+      ]
+    },
+    "stdlib": {
+      "path": "stdlib",
+      "purpose": null,
+      "fileCount": 5,
+      "lastAccessed": 1775071798786,
+      "keyFiles": [
+        "Option.zs",
+        "arraylist.zs",
+        "fs.zs",
+        "prelude.zs",
+        "string.zs"
+      ]
+    },
+    "zig-out": {
+      "path": "zig-out",
+      "purpose": null,
+      "fileCount": 0,
+      "lastAccessed": 1775071798786,
+      "keyFiles": []
+    },
+    "intellij-plugin/build": {
+      "path": "intellij-plugin/build",
+      "purpose": "Build output",
+      "fileCount": 1,
+      "lastAccessed": 1775071798786,
+      "keyFiles": [
+        "coroutines-javaagent.jar"
+      ]
+    },
+    "src/helpers": {
+      "path": "src/helpers",
+      "purpose": "Helper functions",
+      "fileCount": 3,
+      "lastAccessed": 1775071798787,
+      "keyFiles": [
+        "README.md",
+        "mangle_helpers.zig",
+        "source_helpers.zig"
+      ]
+    },
+    "zig-out/bin": {
+      "path": "zig-out/bin",
+      "purpose": "Executable scripts",
+      "fileCount": 2,
+      "lastAccessed": 1775071798787,
+      "keyFiles": [
+        "ZenScript",
+        "zs-daemon"
+      ]
+    },
+    "zig-out/lib": {
+      "path": "zig-out/lib",
+      "purpose": "Library code",
+      "fileCount": 1,
+      "lastAccessed": 1775071798787,
+      "keyFiles": [
+        "ZenScriptNode.node"
+      ]
+    }
+  },
+  "hotPaths": [
+    {
+      "path": "src/analyzer/analyzer.zig",
+      "accessCount": 165,
+      "lastAccessed": 1775090137773,
+      "type": "file"
+    },
+    {
+      "path": "src/codegen/llvm_codegen.zig",
+      "accessCount": 86,
+      "lastAccessed": 1775091927036,
+      "type": "file"
+    },
+    {
+      "path": "src/ir/ir_gen.zig",
+      "accessCount": 73,
+      "lastAccessed": 1775091801302,
+      "type": "file"
+    },
+    {
+      "path": "src/parser.zig",
+      "accessCount": 61,
+      "lastAccessed": 1775088734849,
+      "type": "file"
+    },
+    {
+      "path": "src/pipeline.zig",
+      "accessCount": 44,
+      "lastAccessed": 1775092176013,
+      "type": "file"
+    },
+    {
+      "path": "src/ir/zsir.zig",
+      "accessCount": 24,
+      "lastAccessed": 1775091890886,
+      "type": "file"
+    },
+    {
+      "path": "src",
+      "accessCount": 22,
+      "lastAccessed": 1775088730780,
+      "type": "directory"
+    },
+    {
+      "path": "stdlib/prelude.zs",
+      "accessCount": 19,
+      "lastAccessed": 1775090227787,
+      "type": "file"
+    },
+    {
+      "path": "src/ast/zs_stmt.zig",
+      "accessCount": 18,
+      "lastAccessed": 1775088703713,
+      "type": "file"
+    },
+    {
+      "path": "src/ast/zs_expr.zig",
+      "accessCount": 17,
+      "lastAccessed": 1775089115922,
+      "type": "file"
+    },
+    {
+      "path": "intellij-plugin/src/main/kotlin/org/zenscript/intellij/parser/ZenScriptParser.kt",
+      "accessCount": 15,
+      "lastAccessed": 1775078518339,
+      "type": "file"
+    },
+    {
+      "path": "src/tokens/tokenizer.zig",
+      "accessCount": 11,
+      "lastAccessed": 1775075075952,
+      "type": "directory"
+    },
+    {
+      "path": "SPECIFICATION.md",
+      "accessCount": 10,
+      "lastAccessed": 1775083856200,
+      "type": "file"
+    },
+    {
+      "path": "src/ast/ast_node.zig",
+      "accessCount": 9,
+      "lastAccessed": 1775088703721,
+      "type": "file"
+    },
+    {
+      "path": "src/args/args.zig",
+      "accessCount": 9,
+      "lastAccessed": 1775091374674,
+      "type": "file"
+    },
+    {
+      "path": "intellij-plugin/src/main/kotlin/org/zenscript/intellij/psi/ZenScriptTokenSets.kt",
+      "accessCount": 8,
+      "lastAccessed": 1775078168000,
+      "type": "file"
+    },
+    {
+      "path": "src/preprocessor.zig",
+      "accessCount": 8,
+      "lastAccessed": 1775082894769,
+      "type": "file"
+    },
+    {
+      "path": "src/ast/zs_type_notation.zig",
+      "accessCount": 8,
+      "lastAccessed": 1775085757270,
+      "type": "file"
+    },
+    {
+      "path": "stdlib/fs.zs",
+      "accessCount": 7,
+      "lastAccessed": 1775090199524,
+      "type": "file"
+    },
+    {
+      "path": "examples/files.zs",
+      "accessCount": 7,
+      "lastAccessed": 1775091357616,
+      "type": "file"
+    },
+    {
+      "path": "stdlib/bufio.zs",
+      "accessCount": 6,
+      "lastAccessed": 1775084001258,
+      "type": "file"
+    },
+    {
+      "path": "src/tokens/zs_token.zig",
+      "accessCount": 6,
+      "lastAccessed": 1775088716544,
+      "type": "file"
+    },
+    {
+      "path": "src/daemon",
+      "accessCount": 5,
+      "lastAccessed": 1775075219099,
+      "type": "directory"
+    },
+    {
+      "path": "src/ast/zs_stmt_fn.zig",
+      "accessCount": 5,
+      "lastAccessed": 1775088701838,
+      "type": "file"
+    },
+    {
+      "path": "",
+      "accessCount": 5,
+      "lastAccessed": 1775091174032,
+      "type": "directory"
+    },
+    {
+      "path": "src/daemon/handler.zig",
+      "accessCount": 4,
+      "lastAccessed": 1775075229784,
+      "type": "file"
+    },
+    {
+      "path": "intellij-plugin/src/main/kotlin/org/zenscript/intellij/lexer/ZenScriptLexer.kt",
+      "accessCount": 4,
+      "lastAccessed": 1775077936876,
+      "type": "file"
+    },
+    {
+      "path": "intellij-plugin/src/main/kotlin/org/zenscript/intellij/completion/ZenScriptCompletionContributor.kt",
+      "accessCount": 4,
+      "lastAccessed": 1775078506337,
+      "type": "file"
+    },
+    {
+      "path": "src/ast",
+      "accessCount": 4,
+      "lastAccessed": 1775088700662,
+      "type": "directory"
+    },
+    {
+      "path": "intellij-plugin/src/main/kotlin/org/zenscript/intellij/psi/ZenScriptElementTypes.kt",
+      "accessCount": 3,
+      "lastAccessed": 1775077900352,
+      "type": "file"
+    },
+    {
+      "path": "intellij-plugin/src/main/kotlin/org/zenscript/intellij/highlighting/ZenScriptColorSettingsPage.kt",
+      "accessCount": 3,
+      "lastAccessed": 1775078110962,
+      "type": "file"
+    },
+    {
+      "path": "src/ast/zs_module.zig",
+      "accessCount": 3,
+      "lastAccessed": 1775082856824,
+      "type": "file"
+    },
+    {
+      "path": "src/analyzer/symbol_signature.zig",
+      "accessCount": 3,
+      "lastAccessed": 1775085051203,
+      "type": "file"
+    },
+    {
+      "path": "src/codegen",
+      "accessCount": 3,
+      "lastAccessed": 1775088443611,
+      "type": "directory"
+    },
+    {
+      "path": "src/ast/zs_call.zig",
+      "accessCount": 2,
+      "lastAccessed": 1775074461809,
+      "type": "file"
+    },
+    {
+      "path": "src/helpers",
+      "accessCount": 2,
+      "lastAccessed": 1775075201645,
+      "type": "directory"
+    },
+    {
+      "path": "src/daemon_api.zig",
+      "accessCount": 2,
+      "lastAccessed": 1775075234864,
+      "type": "directory"
+    },
+    {
+      "path": "intellij-plugin/src/main/kotlin/org/zenscript/intellij/highlighting/ZenScriptSyntaxHighlighter.kt",
+      "accessCount": 2,
+      "lastAccessed": 1775077582813,
+      "type": "file"
+    },
+    {
+      "path": "src/main.zig",
+      "accessCount": 2,
+      "lastAccessed": 1775079015049,
+      "type": "file"
+    },
+    {
+      "path": "intellij-plugin/src/main/kotlin/org/zenscript/intellij/highlighting/ZenScriptAnnotator.kt",
+      "accessCount": 1,
+      "lastAccessed": 1775077051796,
+      "type": "file"
+    },
+    {
+      "path": "intellij-plugin/src/main/kotlin/org/zenscript/intellij/psi/ZenScriptPsiFactory.kt",
+      "accessCount": 1,
+      "lastAccessed": 1775077061825,
+      "type": "file"
+    },
+    {
+      "path": "intellij-plugin/src/main/kotlin/org/zenscript/intellij/psi/ZenScriptImportElements.kt",
+      "accessCount": 1,
+      "lastAccessed": 1775077061879,
+      "type": "file"
+    },
+    {
+      "path": "intellij-plugin/src/main/kotlin/org/zenscript/intellij/psi/ZenScriptNamedElementImpl.kt",
+      "accessCount": 1,
+      "lastAccessed": 1775077068537,
+      "type": "file"
+    },
+    {
+      "path": "intellij-plugin/src/main/kotlin/org/zenscript/intellij/parser/ZenScriptParserDefinition.kt",
+      "accessCount": 1,
+      "lastAccessed": 1775077068563,
+      "type": "file"
+    },
+    {
+      "path": "intellij-plugin/src/test/kotlin/org/zenscript/intellij/ZenScriptCompletionTest.kt",
+      "accessCount": 1,
+      "lastAccessed": 1775077068594,
+      "type": "file"
+    },
+    {
+      "path": "intellij-plugin/src/main/kotlin/org/zenscript/intellij/psi/ZenScriptReferenceExpression.kt",
+      "accessCount": 1,
+      "lastAccessed": 1775077068620,
+      "type": "file"
+    },
+    {
+      "path": "intellij-plugin/src/main/kotlin/org/zenscript/intellij",
+      "accessCount": 1,
+      "lastAccessed": 1775078172900,
+      "type": "directory"
+    },
+    {
+      "path": "stdlib/Option.zs",
+      "accessCount": 1,
+      "lastAccessed": 1775083931297,
+      "type": "file"
+    },
+    {
+      "path": "stdlib/Either.zs",
+      "accessCount": 1,
+      "lastAccessed": 1775083950253,
+      "type": "file"
+    },
+    {
+      "path": "stdlib/string.zs",
+      "accessCount": 1,
+      "lastAccessed": 1775085011820,
+      "type": "file"
+    }
+  ],
+  "userDirectives": []
+}

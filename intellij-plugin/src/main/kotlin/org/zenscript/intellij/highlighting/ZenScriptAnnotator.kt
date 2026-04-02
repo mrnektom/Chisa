@@ -5,6 +5,7 @@ import com.intellij.lang.annotation.Annotator
 import com.intellij.lang.annotation.HighlightSeverity
 import com.intellij.openapi.editor.colors.TextAttributesKey
 import com.intellij.psi.PsiElement
+import org.zenscript.intellij.psi.ZenScriptEnumVariant
 import org.zenscript.intellij.psi.ZenScriptFnDeclaration
 import org.zenscript.intellij.psi.ZenScriptReferenceExpression
 import org.zenscript.intellij.psi.ZenScriptStructField
@@ -15,6 +16,7 @@ class ZenScriptAnnotator : Annotator {
         when (element) {
             is ZenScriptFnDeclaration -> highlightNameIdentifier(element, holder, ZenScriptSyntaxHighlighter.FUNCTION_NAME)
             is ZenScriptStructField -> highlightNameIdentifier(element, holder, ZenScriptSyntaxHighlighter.FIELD_NAME)
+            is ZenScriptEnumVariant -> highlightNameIdentifier(element, holder, ZenScriptSyntaxHighlighter.ENUM_VARIANT_NAME)
             is ZenScriptReferenceExpression -> annotateReference(element, holder)
         }
     }
@@ -34,6 +36,7 @@ class ZenScriptAnnotator : Annotator {
         val key = when (resolved) {
             is ZenScriptFnDeclaration -> ZenScriptSyntaxHighlighter.FUNCTION_CALL
             is ZenScriptStructField -> ZenScriptSyntaxHighlighter.FIELD_NAME
+            is ZenScriptEnumVariant -> ZenScriptSyntaxHighlighter.ENUM_VARIANT_NAME
             else -> return
         }
 

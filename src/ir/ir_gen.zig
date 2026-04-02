@@ -20,10 +20,13 @@ fieldIndices: *const std.AutoHashMap(usize, u32),
 enumInits: *const std.AutoHashMap(usize, Analyzer.EnumInitInfo),
 derefTypes: *const std.AutoHashMap(usize, []const u8),
 indexElemTypes: *const std.AutoHashMap(usize, []const u8),
+arrayLiteralElemTypes: *const std.AutoHashMap(usize, []const u8),
 monomorphizedFunctions: []const ast.stmt.ZSFn,
 structInitResolutions: *const std.AutoHashMap(usize, []const u8),
 monomorphizedEnums: ?*const std.StringHashMap(Analyzer.MonomorphizedEnumDef),
 matchEnumNames: ?*const std.AutoHashMap(usize, []const u8),
+extensionCalls: ?*const std.AutoHashMap(usize, void),
+lambdaNames: ?*const std.AutoHashMap(usize, []const u8),
 
 pub const IrGenResult = struct {
     instructions: ir.ZSIRInstructions,
@@ -44,10 +47,11 @@ pub fn generateIr(
     enumInits: *const std.AutoHashMap(usize, Analyzer.EnumInitInfo),
     derefTypes: *const std.AutoHashMap(usize, []const u8),
     indexElemTypes: *const std.AutoHashMap(usize, []const u8),
+    arrayLiteralElemTypes: *const std.AutoHashMap(usize, []const u8),
     monomorphizedFunctions: []const ast.stmt.ZSFn,
     structInitResolutions: *const std.AutoHashMap(usize, []const u8),
 ) !IrGenResult {
-    return generateIrWithImports(module, allocator, resolutions, overloadedNames, fieldIndices, enumInits, derefTypes, indexElemTypes, monomorphizedFunctions, structInitResolutions, null, null, null);
+    return generateIrWithImports(module, allocator, resolutions, overloadedNames, fieldIndices, enumInits, derefTypes, indexElemTypes, arrayLiteralElemTypes, monomorphizedFunctions, structInitResolutions, null, null, null, null, null);
 }
 
 pub fn generateIrWithImports(
@@ -59,11 +63,14 @@ pub fn generateIrWithImports(
     enumInits: *const std.AutoHashMap(usize, Analyzer.EnumInitInfo),
     derefTypes: *const std.AutoHashMap(usize, []const u8),
     indexElemTypes: *const std.AutoHashMap(usize, []const u8),
+    arrayLiteralElemTypes: *const std.AutoHashMap(usize, []const u8),
     monomorphizedFunctions: []const ast.stmt.ZSFn,
     structInitResolutions: *const std.AutoHashMap(usize, []const u8),
     importedVarNames: ?*const std.StringHashMap([]const u8),
     monomorphizedEnums: ?*const std.StringHashMap(Analyzer.MonomorphizedEnumDef),
     matchEnumNames: ?*const std.AutoHashMap(usize, []const u8),
+    extensionCalls: ?*const std.AutoHashMap(usize, void),
+    lambdaNames: ?*const std.AutoHashMap(usize, []const u8),
 ) !IrGenResult {
     var instructions = try std.ArrayList(ir.ZSIR).initCapacity(allocator, 5);
     defer instructions.deinit(allocator);
@@ -88,10 +95,13 @@ pub fn generateIrWithImports(
         .enumInits = enumInits,
         .derefTypes = derefTypes,
         .indexElemTypes = indexElemTypes,
+        .arrayLiteralElemTypes = arrayLiteralElemTypes,
         .monomorphizedFunctions = monomorphizedFunctions,
         .structInitResolutions = structInitResolutions,
         .monomorphizedEnums = monomorphizedEnums,
         .matchEnumNames = matchEnumNames,
+        .extensionCalls = extensionCalls,
+        .lambdaNames = lambdaNames,
     };
 
     // Generate IR for monomorphized generic enums before other nodes
@@ -132,6 +142,25 @@ pub fn generateIrWithImports(
 
 const computeMangledName = @import("ZenScript").MangleHelpers.computeMangledName;
 
+/// Returns an owned (allocated) IR type name string for the given AST type annotation.
+/// Generic types like `Either<FsError, String>` produce mangled names like `Either__FsError_String`.
+fn typeAnnotationToIrTypeName(allocator: std.mem.Allocator, t: ast.ZSType) ![]const u8 {
+    return switch (t) {
+        .reference => |ref| try allocator.dupe(u8, ref),
+        .generic => |g| blk: {
+            const typeArgNames = try allocator.alloc([]const u8, g.type_args.len);
+            defer allocator.free(typeArgNames);
+            for (g.type_args, 0..) |ta, i| {
+                typeArgNames[i] = try typeAnnotationToIrTypeName(allocator, ta);
+            }
+            defer for (typeArgNames) |n| allocator.free(n);
+            break :blk try computeMangledName(allocator, g.name, typeArgNames);
+        },
+        .array => try allocator.dupe(u8, "pointer"),
+        .fn_type => try allocator.dupe(u8, "function"),
+    };
+}
+
 fn generateNode(self: *Self, node: ast.ZSAstNode) ![]const u8 {
     return switch (node) {
         .stmt => try self.generateStmt(node.stmt),
@@ -139,6 +168,7 @@ fn generateNode(self: *Self, node: ast.ZSAstNode) ![]const u8 {
         .import_decl => |imp| try self.generateImport(imp),
         .export_from => |ef| try self.generateExportFrom(ef),
         .use_decl => "",  // use declarations don't generate IR
+        .when_decl, .target_decl => "", // consumed by preprocessor
     };
 }
 
@@ -166,6 +196,9 @@ fn generateStmt(self: *Self, stmt: ast.stmt.ZSStmt) ![]const u8 {
         .reassign => try self.generateReassign(stmt.reassign),
         .struct_decl => "",  // Struct declarations don't generate IR instructions
         .enum_decl => try self.generateEnumDecl(stmt.enum_decl),
+        .scalar_decl => "",  // Scalar declarations don't generate IR instructions
+        .type_alias => "",  // Type aliases don't generate IR
+        .asm_block => try self.generateAsmBlock(stmt.asm_block),
     };
 }
 
@@ -192,6 +225,7 @@ fn generateExpr(self: *Self, expr: ast.expr.ZSExpr) Error![]const u8 {
         .index_access => self.generateIndexAccess(expr.index_access),
         .enum_init => self.generateEnumInit(expr.enum_init),
         .match_expr => self.generateMatchExpr(expr.match_expr),
+        .lambda => self.generateLambda(expr.lambda),
     };
 }
 
@@ -220,34 +254,33 @@ fn generateCallOrIntrinsic(self: *Self, call: ast.expr.ZSCall) Error![]const u8 
             } });
             return resultName;
         }
-        if (std.mem.eql(u8, name, "alloc") and call.arguments.len == 1) {
-            const sizeOperand = try self.generateExpr(call.arguments[0]);
-            const resultName = try self.generateName();
-            try self.instructions.append(self.allocator, ir.ZSIR{ .alloc_op = .{
-                .resultName = resultName,
-                .sizeOperand = sizeOperand,
-            } });
-            return resultName;
-        }
-        if (std.mem.eql(u8, name, "free") and call.arguments.len == 2) {
-            const pointer = try self.generateExpr(call.arguments[0]);
-            const sizeOperand = try self.generateExpr(call.arguments[1]);
-            try self.instructions.append(self.allocator, ir.ZSIR{ .free_op = .{
-                .pointer = pointer,
-                .sizeOperand = sizeOperand,
-            } });
-            return "";
-        }
     }
     return self.generateCall(call);
 }
 
 fn generateCall(self: *Self, call: ast.expr.ZSCall) Error![]const u8 {
-    var callerName = try self.generateExpr(call.subject.*);
-    const argNames = try self.allocator.alloc([]const u8, call.arguments.len);
+    // Check if this is an extension function call
+    const isExtCall = if (self.extensionCalls) |ec| ec.contains(call.startPos) else false;
 
-    for (call.arguments, 0..) |arg, index| {
-        argNames[index] = try self.generateExpr(arg);
+    var callerName: []const u8 = undefined;
+    var argNames: [][]const u8 = undefined;
+
+    if (isExtCall and call.subject.* == .field_access) {
+        // Generate receiver as first arg
+        const fa = call.subject.*.field_access;
+        const receiverName = try self.generateExpr(fa.subject.*);
+        argNames = try self.allocator.alloc([]const u8, call.arguments.len + 1);
+        argNames[0] = receiverName;
+        for (call.arguments, 0..) |arg, i| {
+            argNames[i + 1] = try self.generateExpr(arg);
+        }
+        callerName = fa.field; // will be overridden by resolution
+    } else {
+        callerName = try self.generateExpr(call.subject.*);
+        argNames = try self.allocator.alloc([]const u8, call.arguments.len);
+        for (call.arguments, 0..) |arg, i| {
+            argNames[i] = try self.generateExpr(arg);
+        }
     }
 
     // Check if this call has a resolved overload name
@@ -263,6 +296,7 @@ fn generateCall(self: *Self, call: ast.expr.ZSCall) Error![]const u8 {
                 .resultName = resultName,
                 .fnName = callerName,
                 .argNames = argNames,
+                .startPos = call.startPos,
             },
         },
     );
@@ -336,30 +370,62 @@ fn resolveFieldTargetSubject(f: *const ast.stmt.ZSReassign.FieldTarget, self: *S
 }
 
 fn generateFunction(self: *Self, func: ast.stmt.ZSFn) ![]const u8 {
-    // Skip generic function templates — only monomorphized copies generate IR
-    if (func.type_params.len > 0) return "";
+    // Skip generic function templates — only monomorphized copies generate IR.
+    // Also skip extension methods on generic receiver types (receiver_type_params non-empty).
+    if (func.type_params.len > 0 or func.receiver_type_params.len > 0) return "";
 
-    const argTypes = try self.allocator.alloc([]const u8, func.args.len);
-    for (func.args, 0..) |arg, i| {
-        argTypes[i] = if (arg.type) |t| t.typeName() else "unknown";
-    }
+    const isExtension = func.receiver_type != null;
 
-    const retType: []const u8 = if (func.ret) |r| r.typeName() else "void";
+    const argTypes = if (isExtension) blk: {
+        const at = try self.allocator.alloc([]const u8, func.args.len + 1);
+        at[0] = try self.allocator.dupe(u8, func.receiver_type.?);
+        for (func.args, 0..) |arg, i| {
+            at[i + 1] = if (arg.type) |t| try typeAnnotationToIrTypeName(self.allocator, t) else try self.allocator.dupe(u8, "unknown");
+        }
+        break :blk at;
+    } else blk: {
+        const at = try self.allocator.alloc([]const u8, func.args.len);
+        for (func.args, 0..) |arg, i| {
+            at[i] = if (arg.type) |t| try typeAnnotationToIrTypeName(self.allocator, t) else try self.allocator.dupe(u8, "unknown");
+        }
+        break :blk at;
+    };
+
+    const retType: []const u8 = if (func.ret) |r| try typeAnnotationToIrTypeName(self.allocator, r) else try self.allocator.dupe(u8, "void");
     const external = func.modifiers.external != null;
 
     // Determine the function name: mangle if overloaded and not external
     // Always allocate an owned copy so IR can free it uniformly
-    const fnName = if (!external and self.overloadedNames.contains(func.name))
+    const fnName = if (isExtension) blk: {
+        const key = try std.fmt.allocPrint(self.allocator, "{s}.{s}", .{ func.receiver_type.?, func.name });
+        if (external) {
+            break :blk key;
+        } else {
+            const mname = try computeMangledName(self.allocator, key, argTypes[1..]);
+            self.allocator.free(key);
+            break :blk mname;
+        }
+    } else if (!external and self.overloadedNames.contains(func.name))
         try computeMangledName(self.allocator, func.name, argTypes)
     else
         try self.allocator.dupe(u8, func.name);
 
     if (func.body) |body| {
-        // User-defined function with body
-        const argNames = try self.allocator.alloc([]const u8, func.args.len);
-        for (func.args, 0..) |arg, i| {
-            argNames[i] = arg.name;
-        }
+        // User-defined function with body — include 'this' for extension functions
+        const argNames = if (isExtension) blk: {
+            const an = try self.allocator.alloc([]const u8, func.args.len + 1);
+            an[0] = "this";
+            for (func.args, 0..) |arg, i| {
+                an[i + 1] = arg.name;
+            }
+            break :blk an;
+        } else blk: {
+            const an = try self.allocator.alloc([]const u8, func.args.len);
+            for (func.args, 0..) |arg, i| {
+                an[i] = arg.name;
+            }
+            break :blk an;
+        };
 
         // Generate body instructions into a separate list
         var bodyInstructions = try std.ArrayList(ir.ZSIR).initCapacity(self.allocator, 8);
@@ -399,6 +465,7 @@ fn generateFunction(self: *Self, func: ast.stmt.ZSFn) ![]const u8 {
                 ir.ZSIR{
                     .ret = ir.ZSIRRet{
                         .value = bodyResult,
+                        .startPos = body.start(),
                     },
                 },
             );
@@ -416,6 +483,7 @@ fn generateFunction(self: *Self, func: ast.stmt.ZSFn) ![]const u8 {
                     .argNames = argNames,
                     .retType = retType,
                     .body = try self.allocator.dupe(ir.ZSIR, bodyInstructions.items),
+                    .startPos = body.start(),
                 },
             },
         );
@@ -479,6 +547,7 @@ fn generateIfExpr(self: *Self, ifExpr: ast.expr.ZSIfExpr) Error![]const u8 {
                 .resultName = resultName,
                 .thenResult = if (thenHasValue) thenResult else null,
                 .elseResult = elseResult,
+                .startPos = ifExpr.startPos,
             },
         },
     );
@@ -564,6 +633,7 @@ fn generateLogicalAnd(self: *Self, binary: ast.expr.ZSBinary) Error![]const u8 {
                 .resultName = resultName,
                 .thenResult = thenResult,
                 .elseResult = elseResult,
+                .startPos = binary.startPos,
             },
         },
     );
@@ -602,6 +672,7 @@ fn generateLogicalOr(self: *Self, binary: ast.expr.ZSBinary) Error![]const u8 {
                 .resultName = resultName,
                 .thenResult = thenResult,
                 .elseResult = elseResult,
+                .startPos = binary.startPos,
             },
         },
     );
@@ -722,6 +793,7 @@ fn generateReturn(self: *Self, ret: ast.expr.ZSReturn) Error![]const u8 {
         ir.ZSIR{
             .ret = ir.ZSIRRet{
                 .value = valueName,
+                .startPos = ret.startPos,
             },
         },
     );
@@ -771,19 +843,19 @@ fn generateFieldAccess(self: *Self, fa: ast.expr.ZSFieldAccess) Error![]const u8
 }
 
 fn generateNumberAssign(self: *Self, number: ast.expr.ZSNumber) Error![]const u8 {
-    return self.generateAssign(ir.ZSIRValue{ .number = try std.fmt.parseInt(i32, number.value, 10) });
+    return self.generateAssign(ir.ZSIRValue{ .number = try std.fmt.parseInt(i32, number.value, 10) }, number.startPos);
 }
 
 fn generateStringAssign(self: *Self, string: ast.expr.ZSString) Error![]const u8 {
-    return self.generateAssign(ir.ZSIRValue{ .string = string.value });
+    return self.generateAssign(ir.ZSIRValue{ .string = string.value }, string.startPos);
 }
 
 fn generateBooleanAssign(self: *Self, boolean: ast.expr.ZSBoolean) Error![]const u8 {
-    return self.generateAssign(ir.ZSIRValue{ .boolean = boolean.value });
+    return self.generateAssign(ir.ZSIRValue{ .boolean = boolean.value }, boolean.startPos);
 }
 
 fn generateCharAssign(self: *Self, char: ast.expr.ZSChar) Error![]const u8 {
-    return self.generateAssign(ir.ZSIRValue{ .char = char.value });
+    return self.generateAssign(ir.ZSIRValue{ .char = char.value }, char.startPos);
 }
 
 fn generateArrayLiteral(self: *Self, al: ast.expr.ZSArrayLiteral) Error![]const u8 {
@@ -791,13 +863,8 @@ fn generateArrayLiteral(self: *Self, al: ast.expr.ZSArrayLiteral) Error![]const 
     for (al.elements, 0..) |elem, i| {
         elements[i] = try self.generateExpr(elem);
     }
-    // Determine element type from first element (default "number")
-    const elemType: []const u8 = if (al.elements.len > 0) switch (al.elements[0]) {
-        .char => "char",
-        .string => "String",
-        .boolean => "boolean",
-        else => "number",
-    } else "number";
+    // Determine element type from analyzer-provided type info
+    const elemType: []const u8 = self.arrayLiteralElemTypes.get(al.startPos) orelse "number";
     const resultName = try self.generateName();
     try self.instructions.append(self.allocator, ir.ZSIR{ .array_init = .{
         .resultName = resultName,
@@ -881,14 +948,31 @@ fn generateEnumInit(self: *Self, ei: ast.expr.ZSEnumInit) Error![]const u8 {
     return resultName;
 }
 
+fn zsSymbolTypeToIrName(t: sig.ZSType) []const u8 {
+    return switch (t) {
+        .number => "number",
+        .boolean => "boolean",
+        .char => "char",
+        .long => "long",
+        .short => "short",
+        .byte => "byte",
+        .function => "function",
+        .unknown => "unknown",
+        .struct_type => |st| st.name,
+        .pointer => "pointer",
+        .array_type => "array",
+        .enum_type => |et| et.name,
+    };
+}
+
 fn generateMatchExpr(self: *Self, me: ast.expr.ZSMatchExpr) Error![]const u8 {
     const subjectName = try self.generateExpr(me.subject.*);
 
     // Use the resolved enum name from the analyzer (handles monomorphized generic enums)
     const enumName: []const u8 = if (self.matchEnumNames) |men|
-        (men.get(me.startPos) orelse (if (me.arms.len > 0) me.arms[0].enum_name else ""))
+        (men.get(me.startPos) orelse (if (me.arms.len > 0 and me.arms[0].pattern == .enum_variant) me.arms[0].pattern.enum_variant.enum_name else ""))
     else
-        (if (me.arms.len > 0) me.arms[0].enum_name else "");
+        (if (me.arms.len > 0 and me.arms[0].pattern == .enum_variant) me.arms[0].pattern.enum_variant.enum_name else "");
 
     var irArms = try self.allocator.alloc(ir.ZSIRMatchArm, me.arms.len);
 
@@ -898,16 +982,35 @@ fn generateMatchExpr(self: *Self, me: ast.expr.ZSMatchExpr) Error![]const u8 {
         var variantPayloadType: ?[]const u8 = null;
         switch (arm.pattern) {
             .enum_variant => |ev| {
+                // First look up in top-level (entry module) enum_decl instructions
+                var found = false;
                 for (self.topLevelInstructions.items) |inst| {
                     if (inst == .enum_decl and std.mem.eql(u8, inst.enum_decl.name, enumName)) {
                         for (inst.enum_decl.variants) |v| {
                             if (std.mem.eql(u8, v.name, ev.variant_name)) {
                                 variantTag = v.tag;
                                 variantPayloadType = v.payloadType;
+                                found = true;
                                 break;
                             }
                         }
                         break;
+                    }
+                }
+                // Fallback: look up from monomorphizedEnums (covers cross-module generic enums)
+                if (!found) {
+                    if (self.monomorphizedEnums) |monoEnums| {
+                        if (monoEnums.get(enumName)) |enumDef| {
+                            for (enumDef.variants) |v| {
+                                if (std.mem.eql(u8, v.name, ev.variant_name)) {
+                                    variantTag = v.tag;
+                                    if (v.payload_type) |pt| {
+                                        variantPayloadType = zsSymbolTypeToIrName(pt);
+                                    }
+                                    break;
+                                }
+                            }
+                        }
                     }
                 }
             },
@@ -1004,9 +1107,91 @@ fn generateMatchExpr(self: *Self, me: ast.expr.ZSMatchExpr) Error![]const u8 {
     return resultName;
 }
 
-fn generateAssign(self: *Self, value: ir.ZSIRValue) Error![]const u8 {
+fn generateLambda(self: *Self, lambda: ast.expr.ZSLambda) Error![]const u8 {
+    const lambdaName = if (self.lambdaNames) |ln|
+        ln.get(lambda.startPos) orelse "__lambda_unknown"
+    else
+        "__lambda_unknown";
+
+    // Generate body instructions into a separate list
+    var lambdaInstructions = try std.ArrayList(ir.ZSIR).initCapacity(self.allocator, 4);
+    defer lambdaInstructions.deinit(self.allocator);
+
+    const outerInstructions = self.instructions;
+    self.instructions = &lambdaInstructions;
+
+    // Create isolated scope for lambda params
+    var innerVarNames = std.StringHashMap([]const u8).init(self.allocator);
+    var outerIter = self.varNames.iterator();
+    while (outerIter.next()) |entry| {
+        try innerVarNames.put(entry.key_ptr.*, entry.value_ptr.*);
+    }
+    for (lambda.params) |param| {
+        try innerVarNames.put(param.name, param.name);
+    }
+    const outerVarNames = self.varNames;
+    self.varNames = innerVarNames;
+
+    const bodyResult = try self.generateExpr(lambda.body.*);
+
+    // Add implicit return for expression body
+    if (lambda.body.* != .block) {
+        try self.instructions.append(self.allocator, ir.ZSIR{ .ret = .{ .value = bodyResult } });
+    }
+
+    // Restore state
+    self.instructions = outerInstructions;
+    var modifiedInner = self.varNames;
+    self.varNames = outerVarNames;
+    modifiedInner.deinit();
+
+    // Build arg names/types for the lambda function
+    const argNames = try self.allocator.alloc([]const u8, lambda.params.len);
+    const argTypes = try self.allocator.alloc([]const u8, lambda.params.len);
+    for (lambda.params, 0..) |param, i| {
+        argNames[i] = param.name;
+        argTypes[i] = "unknown";
+    }
+
+    // Emit fn_def at top level
+    try self.topLevelInstructions.append(self.allocator, ir.ZSIR{ .fn_def = .{
+        .name = lambdaName,
+        .argNames = argNames,
+        .argTypes = argTypes,
+        .retType = "unknown",
+        .body = try self.allocator.dupe(ir.ZSIR, lambdaInstructions.items),
+    } });
+
+    // Return the lambda name as a reference
+    return lambdaName;
+}
+
+fn generateAsmBlock(self: *Self, ab: ast.stmt.ZSAsmBlock) Error![]const u8 {
+    const inputs = try self.allocator.alloc(ir.ZSIRAsmInput, ab.inputs.len);
+    for (ab.inputs, 0..) |inp, i| {
+        const val = try self.generateExpr(inp.expr);
+        inputs[i] = .{ .reg = inp.reg, .value = val };
+    }
+
+    const outputs = try self.allocator.alloc(ir.ZSIRAsmOutput, ab.outputs.len);
+    for (ab.outputs, 0..) |out, i| {
+        outputs[i] = .{ .reg = out.reg, .name = out.name };
+        try self.varNames.put(out.name, out.name);
+    }
+
+    try self.instructions.append(self.allocator, ir.ZSIR{ .asm_block = .{
+        .inputs = inputs,
+        .outputs = outputs,
+        .clobbers = try self.allocator.dupe([]const u8, ab.clobbers),
+        .instructions = try self.allocator.dupe([]const u8, ab.instructions),
+    } });
+
+    return "";
+}
+
+fn generateAssign(self: *Self, value: ir.ZSIRValue, startPos: usize) Error![]const u8 {
     const name = try self.generateName();
-    try self.instructions.append(self.allocator, ir.ZSIR{ .assign = ir.ZSIRAssign{ .value = value, .varName = name } });
+    try self.instructions.append(self.allocator, ir.ZSIR{ .assign = ir.ZSIRAssign{ .value = value, .varName = name, .startPos = startPos } });
     return name;
 }
 

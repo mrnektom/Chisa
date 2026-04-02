@@ -44,6 +44,8 @@ class ZenScriptParserDefinition : ParserDefinition {
         ZenScriptElementTypes.IMPORT_SYMBOL -> ZenScriptImportSymbol(node)
         ZenScriptElementTypes.IMPORT_PATH -> ZenScriptImportPath(node)
         ZenScriptElementTypes.RETURN_STATEMENT -> ZenScriptReturnStatement(node)
+        ZenScriptElementTypes.SCALAR_DECLARATION -> ZenScriptScalarDeclaration(node)
+        ZenScriptElementTypes.MATCH_BINDING -> ZenScriptMatchBinding(node)
         else -> ASTWrapperPsiElement(node)
     }
 

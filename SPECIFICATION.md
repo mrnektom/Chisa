@@ -303,10 +303,22 @@ let city: string = user?.address?.city.getOrElse("unknown")
 
 ## `!!` Operator (Error Propagation)
 
-`!!` is a postfix operator for propagating errors out of the current function. It calls `.toEither()` on its operand and
-either returns early (on `Left`) or unwraps the value (on `Right`).
+`!!` is a postfix operator for propagating errors out of the current function. It either returns early (on `Left`) or unwraps the value (on `Right`).
 
 ### Desugaring
+
+When the operand is already `Either<L, R>`, `!!` matches it directly — no `.toEither()` call is made:
+
+```zenscript
+eitherExpr!!
+// expands to:
+match eitherExpr {
+    Either.Left(e)  -> return e,
+    Either.Right(v) -> v
+}
+```
+
+When the operand is any other type, `.toEither()` is called first:
 
 ```zenscript
 expr!!
@@ -321,14 +333,14 @@ The type of the whole `expr!!` expression is `Right`.
 
 ### Type constraints
 
-- `expr.toEither()` must return `Either<L, R>`.
+- If the operand is not `Either`, it must have a `.toEither()` extension returning `Either<L, R>`.
 - `L` must exactly match the declared return type of the enclosing function.
 - `!!` may only appear inside a function body.
 
 ### Usage with `Either` directly
 
 ```zenscript
-fn divide(a: number, b: number): string =
+fn divide(a: number, b: number): Either<string, number> =
     if (b == 0) Either.Left("division by zero") else Either.Right(a / b)
 
 fn compute(): string {
@@ -336,8 +348,6 @@ fn compute(): string {
     result * 3                              // reached only when Right
 }
 ```
-
-`Either<L, R>.toEither()` is the identity — applying `!!` to an `Either` value directly is valid.
 
 ### Usage with `Option`
 
@@ -553,6 +563,185 @@ Pointer type is written as `Pointer<T>`. `ptr`, `deref`, `alloc`, and `free` are
 
 ---
 
+## Inline Assembly
+
+`asm { }` embeds raw assembly instructions directly inside a function body. Bindings explicitly map ZenScript values to registers and back.
+
+### Syntax
+
+```zenscript
+asm {
+    in  <reg> = <expr>    // input binding
+    in  <reg> = <expr>
+    out <reg> = <name>    // output binding — declares `let <name>` in current scope
+    clobber <reg>, <reg>  // registers modified but not listed as outputs (optional)
+    "<instruction>"       // assembly instruction strings, emitted in order
+    "<instruction>"
+}
+```
+
+All `in`, `out`, and `clobber` lines must appear before the instruction strings.
+
+### Bindings
+
+| Binding | Meaning |
+|---------|---------|
+| `in reg = expr` | Evaluates `expr` and loads the result into `reg` before the instructions run |
+| `out reg = name` | After the instructions, reads `reg` and declares `let name` in the enclosing scope |
+| `clobber reg, ...` | Declares registers that the asm modifies without an `out` binding; lets the compiler avoid placing live values there |
+
+### Example — Linux syscalls
+
+```zenscript
+// exit(0)
+fn exit(): Unit {
+    asm {
+        in rax = 60
+        in rdi = 0
+        "syscall"
+    }
+}
+
+// write(fd, buf, len) → bytes written
+fn write(fd: number, buf: Pointer<byte>, len: number): number {
+    asm {
+        in  rax = 1
+        in  rdi = fd
+        in  rsi = buf
+        in  rdx = len
+        out rax = written
+        clobber rcx, r11
+        "syscall"
+    }
+    written
+}
+```
+
+### Constraints
+
+- `asm` is a statement — it has no type and cannot be used as an expression.
+- `asm` may only appear inside a function body.
+- An `out` binding declares a new `let` variable; the name must not already exist in the current scope.
+- The assembly dialect and register names are platform-defined (x86-64 by default).
+- The compiler does not analyse or validate instruction strings — correctness is the programmer's responsibility.
+
+---
+
+## Conditional Compilation
+
+Conditional compilation selects declarations, statements, or expressions at compile time based on the target platform or user-defined flags. The keyword is `when`; conditions are compile-time predicates, not runtime expressions.
+
+### File-level: `@target`
+
+`@target` at the top of a file makes the entire file conditional. The file is included in the build only when the condition is true.
+
+```zenscript
+@target(os == "linux")
+
+// everything below is compiled only for Linux
+fn exit(): Unit {
+    asm {
+        in rax = 60
+        in rdi = 0
+        "syscall"
+    }
+}
+```
+
+### Top-level `when`
+
+`when` selects which top-level declarations to emit. Each arm contains a single declaration or a `{ }` block of declarations.
+
+```zenscript
+when {
+    os == "linux" -> fn exit(): Unit {
+        asm { in rax = 60; in rdi = 0; "syscall" }
+    }
+    os == "windows" -> fn exit(): Unit {
+        ExitProcess(0)
+    }
+    else -> external fn exit(): Unit
+}
+
+// Multi-declaration arm
+when {
+    os == "linux" -> {
+        fn exit(): Unit { ... }
+        fn write(fd: number, buf: Pointer<byte>, len: number): number { ... }
+    }
+    else -> {
+        external fn exit(): Unit
+        external fn write(fd: number, buf: Pointer<byte>, len: number): number
+    }
+}
+```
+
+### Inside functions
+
+`when` can also appear as a statement or expression inside a function body.
+
+```zenscript
+// as expression
+fn pageSize(): number = when {
+    arch == "x86_64"  -> 4096,
+    arch == "aarch64" -> 16384,
+    else              -> 4096
+}
+
+// as statement
+fn setup(): Unit {
+    when {
+        debug -> enableLogging()
+        else  -> disableLogging()
+    }
+}
+```
+
+### Built-in compile-time variables
+
+| Variable | Type   | Example values                              |
+|----------|--------|---------------------------------------------|
+| `os`     | string | `"linux"`, `"windows"`, `"macos"`, `"freebsd"` |
+| `arch`   | string | `"x86_64"`, `"aarch64"`, `"wasm32"`         |
+
+### User-defined flags
+
+Flags are passed to the compiler with `-D`:
+
+```
+zs build -D debug -D profile=embedded src/main.zs
+```
+
+Inside `when`, a boolean flag is referenced by name; a string flag uses `==`:
+
+```zenscript
+when {
+    debug                -> print("debug build")
+    profile == "embedded" -> useStaticAlloc()
+    else                 -> useHeapAlloc()
+}
+```
+
+### Condition syntax
+
+| Form | Meaning |
+|------|---------|
+| `variable == "value"` | String equality against a built-in variable or string flag |
+| `flagname` | True if `-D flagname` was passed |
+| `!cond` | Logical not |
+| `cond && cond` | Logical and |
+| `cond \|\| cond` | Logical or |
+
+### Semantics
+
+- Compile-time `when` is evaluated before type-checking. Non-matching arms are ignored completely — they are not type-checked and emit no code or declarations.
+- `when` is syntactically distinct from runtime `match`: `match` requires an expression to match against; `when` uses bare conditions.
+- If no arm matches and there is no `else`, nothing is emitted — this is not an error.
+- `when` used as an expression inside a function requires all matching arms to produce compatible types (same rules as `if`).
+- `@target` must appear before any declarations in a file; only one `@target` per file is allowed.
+
+---
+
 ## Imports and Exports
 
 ```zenscript
@@ -593,7 +782,6 @@ enum Either<Left, Right> { Left(Left), Right(Right) }
 
 | Extension   | Signature                                                   | Description                                         |
 |-------------|-------------------------------------------------------------|-----------------------------------------------------|
-| `toEither`  | `fn Either<L, R>.toEither(): Either<L, R>`                  | Identity — allows `!!` to work on `Either` directly |
 | `mapRight`  | `fn Either<L, R>.mapRight<R2>(f: (R) -> R2): Either<L, R2>` | Transforms the `Right` value, passes `Left` through |
 | `getOrElse` | `fn Either<L, R>.getOrElse(default: R): R`                  | Returns the `Right` value or `default`              |
 

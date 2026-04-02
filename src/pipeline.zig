@@ -12,6 +12,7 @@ const engine = llvm_lib.engine;
 const Args = @import("args/args.zig");
 const zsm = @import("ast/zs_module.zig");
 const type_notation = @import("ast/zs_type_notation.zig");
+const Preprocessor = @import("preprocessor.zig");
 
 /// Convert an AST type notation to the string name used by codegen's mapType.
 fn resolveFieldTypeName(t: type_notation.ZSType) []const u8 {
@@ -33,6 +34,7 @@ fn resolveFieldTypeName(t: type_notation.ZSType) []const u8 {
             return g.name; // other generic struct names
         },
         .array => "pointer", // arrays as pointers
+        .fn_type => "function",
     };
 }
 
@@ -92,8 +94,15 @@ pub fn create() Self {
 
 /// Resolve a relative import path against the importing file's directory.
 fn resolvePath(allocator: std.mem.Allocator, importerPath: []const u8, relativePath: []const u8) ![]const u8 {
-    const dir = std.fs.path.dirname(importerPath) orelse ".";
-    return try std.fs.path.join(allocator, &.{ dir, relativePath });
+    // Paths starting with "./" or "../" are relative to the importing file.
+    // All other paths are relative to CWD (project root).
+    if (std.mem.startsWith(u8, relativePath, "./") or std.mem.startsWith(u8, relativePath, "../")) {
+        const dir = std.fs.path.dirname(importerPath) orelse ".";
+        const raw = try std.mem.concat(allocator, u8, &.{ dir, "/", relativePath });
+        defer allocator.free(raw);
+        return try std.fs.path.resolve(allocator, &.{raw});
+    }
+    return try allocator.dupe(u8, relativePath);
 }
 
 /// Recursively compile a module and all its dependencies.
@@ -117,7 +126,12 @@ fn compileModule(
     try inProgress.put(path, {});
 
     // Read file
-    const file = try std.fs.cwd().openFile(path, .{ .mode = .read_only });
+    const file = std.fs.cwd().openFile(path, .{ .mode = .read_only }) catch |err| {
+        if (err == error.FileNotFound) {
+            std.debug.print("Error: imported module not found: '{s}'\n", .{path});
+        }
+        return err;
+    };
     defer file.close();
     const fileSize: usize = @intCast((try file.stat()).size);
     const buffer = try file.readToEndAlloc(allocator, fileSize);
@@ -126,7 +140,15 @@ fn compileModule(
     // Tokenize & parse
     const tokenizer = Tokenizer.create(buffer);
     var parser = try Parser.create(allocator, tokenizer, path, buffer);
-    const module = try parser.parse(allocator);
+    const rawModule = try parser.parse(allocator);
+    // preprocessModule shares .deps/.allocatedStrings from rawModule, but copies .ast —
+    // so only free the original ast slice, not deinit (would double-free shared fields).
+    defer allocator.free(rawModule.ast);
+
+    // Preprocess conditional compilation
+    var ppCtx = Preprocessor.CompileTimeContext.init(allocator);
+    defer ppCtx.deinit();
+    const module = try Preprocessor.preprocessModule(allocator, rawModule, &ppCtx);
     try allModules.append(allocator, module);
 
     // Recursively compile dependencies
@@ -168,11 +190,14 @@ fn compileModule(
         &analyzeResult.enumInits,
         &analyzeResult.derefTypes,
         &analyzeResult.indexElemTypes,
+        &analyzeResult.arrayLiteralElemTypes,
         analyzeResult.monomorphizedFunctions.items,
         &analyzeResult.structInitResolutions,
         &importedVarNames,
         &analyzeResult.monomorphizedEnums,
         &analyzeResult.matchEnumNames,
+        &analyzeResult.extensionCalls,
+        &analyzeResult.lambdaNames,
     );
 
     const compiled = CompiledModule{
@@ -255,7 +280,13 @@ pub fn compile(self: *Self, args: Args.ExecutionArgs) !void {
     const allocator = gpa.allocator();
     defer _ = gpa.deinit();
 
-    const file = try std.fs.cwd().openFile(args.entryPoint, .{ .mode = .read_only });
+    const file = std.fs.cwd().openFile(args.entryPoint, .{ .mode = .read_only }) catch |err| {
+        if (err == error.FileNotFound) {
+            std.debug.print("Error: file not found: '{s}'\n", .{args.entryPoint});
+            return;
+        }
+        return err;
+    };
     defer file.close();
     const fileSize: usize = @intCast((try file.stat()).size);
     const buffer = try file.readToEndAlloc(allocator, fileSize);
@@ -271,7 +302,15 @@ pub fn compile(self: *Self, args: Args.ExecutionArgs) !void {
         buffer,
     );
 
-    const module = try parser.parse(allocator);
+    const rawModule = try parser.parse(allocator);
+    // preprocessModule shares .deps/.allocatedStrings from rawModule, but copies .ast into a
+    // new slice — so we only free the original ast slice here, not deinit (which would double-free).
+    defer allocator.free(rawModule.ast);
+
+    // Preprocess conditional compilation
+    var ppCtx = Preprocessor.CompileTimeContext.init(allocator);
+    defer ppCtx.deinit();
+    const module = try Preprocessor.preprocessModule(allocator, rawModule, &ppCtx);
     defer module.deinit(allocator);
 
     // Compile dependencies recursively
@@ -315,7 +354,10 @@ pub fn compile(self: *Self, args: Args.ExecutionArgs) !void {
 
         const depPath = try allocator.dupe(u8, resolvedPath);
         defer allocator.free(depPath);
-        const depResult = try compileModule(allocator, depPath, &cache, &inProgress, &allSources, &allModules);
+        const depResult = compileModule(allocator, depPath, &cache, &inProgress, &allSources, &allModules) catch |err| switch (err) {
+            error.FileNotFound => return,
+            else => return err,
+        };
         try depAnalyzeResults.put(dep.path, depResult.analyzeResult);
         try depCompiled.append(allocator, depResult);
 
@@ -334,6 +376,7 @@ pub fn compile(self: *Self, args: Args.ExecutionArgs) !void {
     var preludeStructDefs: ?*const std.StringHashMap(Analyzer.StructDef) = null;
     var preludeEnumDefs: ?*const std.StringHashMap(Analyzer.EnumDef) = null;
     var preludeGenericFns: ?*const std.StringHashMap(Analyzer.GenericFnDef) = null;
+    var preludeScalarDefs: ?*const std.StringHashMap(@import("analyzer/symbol_signature.zig").ZSType) = null;
     if (try findPreludePath(allocator)) |pPath| {
         defer allocator.free(pPath);
         if (compileModule(allocator, pPath, &cache, &inProgress, &allSources, &allModules)) |preludeCompiled| {
@@ -355,12 +398,13 @@ pub fn compile(self: *Self, args: Args.ExecutionArgs) !void {
                 }
             }
             // Get a stable pointer from the cache (not the local copy which goes out of scope)
-            const cachedPrelude = cache.getPtr(pPath) orelse unreachable;
+            const cachedPrelude = cache.getPtr(pPath) orelse return error.PreludeCacheInconsistency;
             preludeExports = &cachedPrelude.analyzeResult.exports;
             preludeOverloads = &cachedPrelude.analyzeResult.overloads;
             preludeStructDefs = &cachedPrelude.analyzeResult.exportedStructDefs;
             preludeEnumDefs = &cachedPrelude.analyzeResult.exportedEnumDefs;
             preludeGenericFns = &cachedPrelude.analyzeResult.genericFns;
+            preludeScalarDefs = &cachedPrelude.analyzeResult.scalarDefs;
 
             // Map all exported symbols from prelude to IR names
             var exportIter = cachedPrelude.analyzeResult.exports.iterator();
@@ -376,7 +420,7 @@ pub fn compile(self: *Self, args: Args.ExecutionArgs) !void {
 
     std.debug.print("Analyzing\n", .{});
 
-    var analyzeResult = try Analyzer.analyzeWithPrelude(module, allocator, &depAnalyzeResults, preludeExports, preludeOverloads, preludeStructDefs, preludeEnumDefs, preludeGenericFns);
+    var analyzeResult = try Analyzer.analyzeWithPrelude(module, allocator, &depAnalyzeResults, preludeExports, preludeOverloads, preludeStructDefs, preludeEnumDefs, preludeGenericFns, preludeScalarDefs);
     defer analyzeResult.deinit(allocator);
 
     for (analyzeResult.errors) |e| {
@@ -393,11 +437,14 @@ pub fn compile(self: *Self, args: Args.ExecutionArgs) !void {
             &analyzeResult.enumInits,
             &analyzeResult.derefTypes,
             &analyzeResult.indexElemTypes,
+            &analyzeResult.arrayLiteralElemTypes,
             analyzeResult.monomorphizedFunctions.items,
             &analyzeResult.structInitResolutions,
             &importedVarNames,
             &analyzeResult.monomorphizedEnums,
             &analyzeResult.matchEnumNames,
+            &analyzeResult.extensionCalls,
+            &analyzeResult.lambdaNames,
         );
         defer entryIrResult.deinit(allocator);
 
@@ -425,15 +472,24 @@ pub fn compile(self: *Self, args: Args.ExecutionArgs) !void {
                 structFieldTypes.deinit();
             }
 
-            const llvmModule = try llvm.generateLLVMModule(&mergedIr, allocator, &structFieldTypes);
+            const llvmModule = try llvm.generateLLVMModule(&mergedIr, allocator, &structFieldTypes, module.source, module.filename, args.debug);
 
             if (args.dumpIr) {
                 const irStr = core.LLVMPrintModuleToString(llvmModule);
                 defer core.LLVMDisposeMessage(irStr);
                 const irSlice = std.mem.span(irStr);
-                const stdout = std.fs.File.stdout();
-                try stdout.writeAll(irSlice);
-                try stdout.writeAll("\n");
+                if (args.outputPath) |outputPath| {
+                    const irPath = try std.fmt.allocPrint(allocator, "{s}.ll", .{outputPath});
+                    defer allocator.free(irPath);
+                    const irFile = try std.fs.cwd().createFile(irPath, .{});
+                    defer irFile.close();
+                    try irFile.writeAll(irSlice);
+                    try irFile.writeAll("\n");
+                } else {
+                    const stdout = std.fs.File.stdout();
+                    try stdout.writeAll(irSlice);
+                    try stdout.writeAll("\n");
+                }
             }
 
             if (args.outputPath) |outputPath| {

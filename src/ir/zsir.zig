@@ -1,5 +1,5 @@
 const std = @import("std");
-const ZSIRType = enum { assign, store, call, fn_decl, fn_def, ret, branch, compare, arith, loop, module_init, struct_init, field_access, ptr_op, deref_op, alloc_op, free_op, array_init, index_access, index_store, field_store, enum_init, match_expr, enum_decl, break_stmt, continue_stmt, not_op };
+const ZSIRType = enum { assign, store, call, fn_decl, fn_def, ret, branch, compare, arith, loop, module_init, struct_init, field_access, ptr_op, deref_op, alloc_op, free_op, array_init, index_access, index_store, field_store, enum_init, match_expr, enum_decl, break_stmt, continue_stmt, not_op, asm_block };
 
 pub const ZSIRInstructions = struct {
     instructions: []ZSIR,
@@ -37,6 +37,7 @@ pub const ZSIR = union(ZSIRType) {
     break_stmt: ZSIRBreak,
     continue_stmt: ZSIRContinue,
     not_op: ZSIRNot,
+    asm_block: ZSIRAsm,
 
     pub fn deinit(self: *const @This(), allocator: std.mem.Allocator) void {
         switch (self.*) {
@@ -66,6 +67,7 @@ pub const ZSIR = union(ZSIRType) {
             .enum_decl => self.enum_decl.deinit(allocator),
             .break_stmt, .continue_stmt => {},
             .not_op => self.not_op.deinit(allocator),
+            .asm_block => self.asm_block.deinit(allocator),
         }
     }
 
@@ -76,7 +78,7 @@ pub const ZSIR = union(ZSIRType) {
         switch (self) {
             .assign => try writer.print("{f}", .{self.assign}),
             .call => try writer.print("{f}", .{self.call}),
-            .store, .fn_decl, .fn_def, .ret, .branch, .compare, .arith, .loop, .module_init, .struct_init, .field_access, .ptr_op, .deref_op, .alloc_op, .free_op, .array_init, .index_access, .index_store, .field_store, .enum_init, .match_expr, .enum_decl, .break_stmt, .continue_stmt, .not_op => {},
+            .store, .fn_decl, .fn_def, .ret, .branch, .compare, .arith, .loop, .module_init, .struct_init, .field_access, .ptr_op, .deref_op, .alloc_op, .free_op, .array_init, .index_access, .index_store, .field_store, .enum_init, .match_expr, .enum_decl, .break_stmt, .continue_stmt, .not_op, .asm_block => {},
         }
     }
 };
@@ -104,6 +106,7 @@ pub const ZSIRValue = union(ZSIRValueType) {
 pub const ZSIRAssign = struct {
     varName: []const u8,
     value: ZSIRValue,
+    startPos: usize = 0,
 
     pub fn deinit(self: *const @This(), allocator: std.mem.Allocator) void {
         allocator.free(self.varName);
@@ -128,6 +131,7 @@ pub const ZSIRCall = struct {
     resultName: []const u8,
     fnName: []const u8,
     argNames: [][]const u8,
+    startPos: usize = 0,
 
     pub fn deinit(self: *const @This(), allocator: std.mem.Allocator) void {
         allocator.free(self.resultName);
@@ -155,6 +159,8 @@ pub const ZSIRFnDecl = struct {
 
     pub fn deinit(self: *const @This(), allocator: std.mem.Allocator) void {
         allocator.free(self.name);
+        allocator.free(self.retType);
+        for (self.argTypes) |t| allocator.free(t);
         allocator.free(self.argTypes);
     }
 };
@@ -165,11 +171,14 @@ pub const ZSIRFnDef = struct {
     argNames: []const []const u8,
     retType: []const u8,
     body: []ZSIR,
+    startPos: usize = 0,
 
     pub fn deinit(self: *const @This(), allocator: std.mem.Allocator) void {
         for (self.body) |inst| inst.deinit(allocator);
         allocator.free(self.body);
         allocator.free(self.name);
+        allocator.free(self.retType);
+        for (self.argTypes) |t| allocator.free(t);
         allocator.free(self.argTypes);
         allocator.free(self.argNames);
     }
@@ -177,6 +186,7 @@ pub const ZSIRFnDef = struct {
 
 pub const ZSIRRet = struct {
     value: ?[]const u8,
+    startPos: usize = 0,
 
     pub fn deinit(_: *const @This(), _: std.mem.Allocator) void {}
 };
@@ -188,6 +198,7 @@ pub const ZSIRBranch = struct {
     resultName: ?[]const u8,
     thenResult: ?[]const u8,
     elseResult: ?[]const u8,
+    startPos: usize = 0,
 
     pub fn deinit(self: *const @This(), allocator: std.mem.Allocator) void {
         for (self.thenBody) |inst| inst.deinit(allocator);
@@ -421,5 +432,29 @@ pub const ZSIRNot = struct {
 
     pub fn deinit(self: *const @This(), allocator: std.mem.Allocator) void {
         allocator.free(self.resultName);
+    }
+};
+
+pub const ZSIRAsmInput = struct {
+    reg: []const u8,
+    value: []const u8,
+};
+
+pub const ZSIRAsmOutput = struct {
+    reg: []const u8,
+    name: []const u8,
+};
+
+pub const ZSIRAsm = struct {
+    inputs: []ZSIRAsmInput,
+    outputs: []ZSIRAsmOutput,
+    clobbers: [][]const u8,
+    instructions: [][]const u8,
+
+    pub fn deinit(self: *const @This(), allocator: std.mem.Allocator) void {
+        allocator.free(self.inputs);
+        allocator.free(self.outputs);
+        allocator.free(self.clobbers);
+        allocator.free(self.instructions);
     }
 };

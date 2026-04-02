@@ -144,12 +144,18 @@ class ZenScriptLexer : LexerBase() {
             ']' -> single(ZenScriptTokenTypes.RBRACKET)
             '-' -> if (next == '>') double(ZenScriptTokenTypes.ARROW) else single(ZenScriptTokenTypes.MINUS)
             '=' -> if (next == '=') double(ZenScriptTokenTypes.EQ_EQ) else single(ZenScriptTokenTypes.EQ)
-            '!' -> if (next == '=') double(ZenScriptTokenTypes.BANG_EQ) else single(ZenScriptTokenTypes.BANG)
+            '!' -> when (next) {
+                '!' -> double(ZenScriptTokenTypes.BANG_BANG)
+                '=' -> double(ZenScriptTokenTypes.BANG_EQ)
+                else -> single(ZenScriptTokenTypes.BANG)
+            }
             '<' -> if (next == '=') double(ZenScriptTokenTypes.LT_EQ) else single(ZenScriptTokenTypes.LT)
             '>' -> if (next == '=') double(ZenScriptTokenTypes.GT_EQ) else single(ZenScriptTokenTypes.GT)
             '&' -> if (next == '&') double(ZenScriptTokenTypes.AND_AND) else single(ZenScriptTokenTypes.BAD_CHARACTER)
             '|' -> if (next == '|') double(ZenScriptTokenTypes.OR_OR) else single(ZenScriptTokenTypes.BAD_CHARACTER)
             '/' -> single(ZenScriptTokenTypes.SLASH)
+            '?' -> if (next == '.') double(ZenScriptTokenTypes.QUEST_DOT) else single(ZenScriptTokenTypes.BAD_CHARACTER)
+            '@' -> single(ZenScriptTokenTypes.AT)
             else -> single(ZenScriptTokenTypes.BAD_CHARACTER)
         }
     }

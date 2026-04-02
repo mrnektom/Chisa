@@ -1,10 +1,10 @@
 let s = "hello"
-print_number(char_at(s, 0))
+printNumber(charAt(s, 0))
 
-if (str_eq("abc", "abc")) print_number(1)
-if (!str_eq("abc", "xyz")) print_number(2)
+if (strEq("abc", "abc")) printNumber(1)
+if (!strEq("abc", "xyz")) printNumber(2)
 
-let s2 = str_concat("hello", " world")
+let s2 = strConcat("hello", " world")
 print(s2)
 
 let sub = substr("hello world", 6, 5)

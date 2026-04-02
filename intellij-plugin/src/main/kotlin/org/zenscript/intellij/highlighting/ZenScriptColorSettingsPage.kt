@@ -25,6 +25,7 @@ class ZenScriptColorSettingsPage : ColorSettingsPage {
             AttributesDescriptor("Function declaration", ZenScriptSyntaxHighlighter.FUNCTION_NAME),
             AttributesDescriptor("Function call", ZenScriptSyntaxHighlighter.FUNCTION_CALL),
             AttributesDescriptor("Field", ZenScriptSyntaxHighlighter.FIELD_NAME),
+            AttributesDescriptor("Enum variant", ZenScriptSyntaxHighlighter.ENUM_VARIANT_NAME),
             AttributesDescriptor("Bad character", ZenScriptSyntaxHighlighter.BAD_CHARACTER),
         )
 
@@ -32,6 +33,7 @@ class ZenScriptColorSettingsPage : ColorSettingsPage {
             "fnDecl" to ZenScriptSyntaxHighlighter.FUNCTION_NAME,
             "fnCall" to ZenScriptSyntaxHighlighter.FUNCTION_CALL,
             "field" to ZenScriptSyntaxHighlighter.FIELD_NAME,
+            "enumVariant" to ZenScriptSyntaxHighlighter.ENUM_VARIANT_NAME,
         )
     }
 
@@ -41,21 +43,26 @@ class ZenScriptColorSettingsPage : ColorSettingsPage {
 
     override fun getDemoText(): String = """
         // ZenScript example
-        struct Point {
-            <field>x</field>: i32;
-            <field>y</field>: i32;
-        }
+        struct Point { <field>x</field>: number, <field>y</field>: number }
 
-        fn <fnDecl>distance</fnDecl>(p: Point): i32 {
-            let dx = p.<field>x</field>;
-            let dy = p.<field>y</field>;
-            return <fnCall>sqrt</fnCall>(dx * dx + dy * dy);
-        }
+        type Predicate<T> = (T) -> boolean
+
+        fn <fnDecl>distance</fnDecl>(p: Point): number = <fnCall>sqrt</fnCall>(p.<field>x</field> * p.<field>x</field> + p.<field>y</field> * p.<field>y</field>)
+
+        fn Point.<fnDecl>scale</fnDecl>(factor: number): Point = Point { x: this.<field>x</field> * factor, y: this.<field>y</field> * factor }
 
         fn <fnDecl>main</fnDecl>() {
-            let p = Point { x: 3, y: 4 };
-            let d = <fnCall>distance</fnCall>(p);
+            let p = Point { x: 3, y: 4 }
+            let d = <fnCall>distance</fnCall>(p)
+            let doubled = p?.scale(2)!!
+            let transform: (number) -> number = { x -> x * 2 }
+            when {
+                os == "linux" -> <fnCall>print</fnCall>(d),
+                else -> <fnCall>print</fnCall>(0)
+            }
         }
+
+        enum Color { <enumVariant>Red</enumVariant>, <enumVariant>Green</enumVariant>, <enumVariant>Blue</enumVariant> }
     """.trimIndent()
 
     override fun getAdditionalHighlightingTagToDescriptorMap(): Map<String, TextAttributesKey> =

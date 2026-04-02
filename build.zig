@@ -53,6 +53,31 @@ pub fn build(b: *std.Build) !void {
     exe.root_module.addImport("clang", clang_mod); // <== add clang module
     b.installArtifact(exe);
 
+    const daemon_api_mod = b.createModule(.{
+        .root_source_file = b.path("src/daemon_api.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "ZenScript", .module = mod },
+        },
+    });
+
+    const daemon_exe = b.addExecutable(.{
+        .name = "zs-daemon",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/daemon/server.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "daemon_api", .module = daemon_api_mod },
+            },
+        }),
+    });
+    b.installArtifact(daemon_exe);
+
+    const daemon_step = b.step("daemon", "Build zs-daemon");
+    daemon_step.dependOn(&b.addInstallArtifact(daemon_exe, .{}).step);
+
     // Install all stdlib files
     b.installDirectory(.{
         .source_dir = b.path("stdlib"),

@@ -3,13 +3,23 @@ package org.zenscript.intellij.documentation
 import com.intellij.lang.documentation.AbstractDocumentationProvider
 import com.intellij.openapi.util.text.StringUtil
 import com.intellij.psi.PsiElement
+import org.zenscript.intellij.daemon.DaemonService
 import org.zenscript.intellij.psi.*
 
 class ZenScriptDocumentationProvider : AbstractDocumentationProvider() {
     override fun generateDoc(element: PsiElement, originalElement: PsiElement?): String? {
         if (element !is ZenScriptNamedElement) return null
         val signature = getDeclarationSignature(element) ?: return null
-        return "<pre>${StringUtil.escapeXmlEntities(signature)}</pre>"
+        val base = "<pre>${StringUtil.escapeXmlEntities(signature)}</pre>"
+
+        val ref = originalElement ?: element
+        val file = ref.containingFile ?: return base
+        val path = file.virtualFile?.path ?: return base
+        val content = file.text ?: return base
+        val offset = ref.textOffset
+        val typeStr = DaemonService.getInstance(file.project).getClient()
+            ?.hover(path, content, offset)
+        return if (typeStr != null) "<b>Type:</b> ${StringUtil.escapeXmlEntities(typeStr)}<br>$base" else base
     }
 
     override fun getQuickNavigateInfo(element: PsiElement, originalElement: PsiElement?): String? {
@@ -62,6 +72,9 @@ class ZenScriptDocumentationProvider : AbstractDocumentationProvider() {
                 text.trim()
             }
             is ZenScriptStructField -> {
+                text.trim()
+            }
+            is ZenScriptScalarDeclaration -> {
                 text.trim()
             }
             else -> null

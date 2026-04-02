@@ -6,7 +6,12 @@ const Pipline = @import("pipeline.zig");
 const llvm = @import("codegen/llvm_codegen.zig");
 
 pub fn main() !void {
-    const args = try Args.collectArgs();
+    const args = Args.collectArgs() catch |err| {
+        switch (err) {
+            error.MissingEntryPoint => std.debug.print("Error: no input file specified. Usage: zenscript -i <file.zs>\n", .{}),
+        }
+        return;
+    };
 
     var pipline = Pipline.create();
     try pipline.compile(args);

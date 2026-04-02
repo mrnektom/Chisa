@@ -14,6 +14,7 @@ import com.intellij.util.ProcessingContext
 import com.intellij.icons.AllIcons
 import org.zenscript.intellij.ZenScriptFile
 import org.zenscript.intellij.ZenScriptLanguage
+import org.zenscript.intellij.daemon.DaemonService
 import org.zenscript.intellij.psi.*
 import org.zenscript.intellij.reference.ZenScriptResolveUtil
 
@@ -34,9 +35,16 @@ class ZenScriptCompletionContributor : CompletionContributor() {
             private val KEYWORDS = listOf(
                 "let", "const", "fn", "if", "else", "while", "for", "return",
                 "enum", "struct", "import", "use", "export", "break", "continue",
-                "match", "true", "false", "external", "pub"
+                "match", "true", "false", "external", "scalar",
+                "when", "asm", "type"
             )
-            private val BUILTIN_TYPES = listOf("number", "string", "boolean", "void", "char", "long", "short", "byte")
+            private val BUILTIN_TYPES = listOf("number", "string", "boolean", "Unit", "char", "long", "short", "byte", "Pointer")
+            private val BUILTIN_OPS = listOf(
+                Triple("ptr", "(expr)", "Pointer<T>"),
+                Triple("deref", "(pointer)", "T"),
+                Triple("alloc", "(size)", "Pointer<T>"),
+                Triple("free", "(pointer, size)", "void")
+            )
         }
 
         override fun addCompletions(
@@ -79,6 +87,7 @@ class ZenScriptCompletionContributor : CompletionContributor() {
                 parent is ZenScriptReferenceExpression -> {
                     addIdentifierCompletions(position, result)
                     if (originalFile != null) addProjectSymbolCompletions(originalFile, result)
+                    addDaemonCompletions(parameters, result)
                     addKeywordCompletions(result)
                 }
                 // Top-level keyword completion (when typing outside any expression)
@@ -130,6 +139,8 @@ class ZenScriptCompletionContributor : CompletionContributor() {
                         .withIcon(AllIcons.Nodes.Enum)
                     is ZenScriptEnumVariant -> LookupElementBuilder.create(name)
                         .withIcon(AllIcons.Nodes.Field)
+                    is ZenScriptMatchBinding -> LookupElementBuilder.create(name)
+                        .withIcon(AllIcons.Nodes.Variable)
                     is ZenScriptParameter -> LookupElementBuilder.create(name)
                         .withIcon(AllIcons.Nodes.Parameter)
                     is ZenScriptImportSymbol -> LookupElementBuilder.create(name)
@@ -138,15 +149,26 @@ class ZenScriptCompletionContributor : CompletionContributor() {
                 }
                 result.addElement(lookup)
             }
+            // Built-in pointer operations
+            for ((opName, tailText, retType) in BUILTIN_OPS) {
+                result.addElement(
+                    LookupElementBuilder.create(opName)
+                        .withIcon(AllIcons.Nodes.Function)
+                        .withTailText(tailText, true)
+                        .withTypeText(retType, true)
+                )
+            }
         }
 
         // 4b. Type completions
         private fun addTypeCompletions(position: PsiElement, result: CompletionResultSet) {
             // Add builtin types
             for (typeName in BUILTIN_TYPES) {
-                result.addElement(
+                val lookup = if (typeName == "Pointer")
+                    LookupElementBuilder.create(typeName).bold().withTailText("<T>", true)
+                else
                     LookupElementBuilder.create(typeName).bold()
-                )
+                result.addElement(lookup)
             }
             // Add user-defined types (structs and enums)
             val variants = ZenScriptResolveUtil.collectVariantElements(position)
@@ -181,16 +203,8 @@ class ZenScriptCompletionContributor : CompletionContributor() {
                 prev = prev.prevSibling
             }
             if (prev == null) return null
-
-            // The REFERENCE_EXPRESSION before the LBRACE is the struct name
-            var structNameRef: PsiElement? = prev.prevSibling
-            while (structNameRef != null && structNameRef.node.elementType == TokenType.WHITE_SPACE) {
-                structNameRef = structNameRef.prevSibling
-            }
-            if (structNameRef !is ZenScriptReferenceExpression) return null
-
-            val resolved = structNameRef.reference.resolve()
-            return resolved as? ZenScriptStructDeclaration
+            val structNameRef = ZenScriptResolveUtil.findStructNameBeforeLbrace(prev) ?: return null
+            return structNameRef.reference.resolve() as? ZenScriptStructDeclaration
         }
 
         private fun addStructLiteralFieldCompletions(refExpr: ZenScriptReferenceExpression, result: CompletionResultSet) {
@@ -340,6 +354,30 @@ class ZenScriptCompletionContributor : CompletionContributor() {
                     PsiDocumentManager.getInstance(project).commitDocument(document)
                 }
             }, file)
+        }
+
+        private fun addDaemonCompletions(parameters: CompletionParameters, result: CompletionResultSet) {
+            val file = parameters.originalFile
+            val path = file.virtualFile?.path ?: return
+            val content = file.text ?: return
+            val offset = parameters.offset
+            val project = file.project
+            val client = DaemonService.getInstance(project).getClient() ?: return
+            val completions = client.complete(path, content, offset)
+            for (c in completions) {
+                val icon = when (c.kind) {
+                    "function" -> AllIcons.Nodes.Function
+                    "variable" -> AllIcons.Nodes.Variable
+                    "struct" -> AllIcons.Nodes.Class
+                    "enum" -> AllIcons.Nodes.Enum
+                    else -> AllIcons.Nodes.Unknown
+                }
+                result.addElement(
+                    LookupElementBuilder.create(c.label)
+                        .withIcon(icon)
+                        .withTypeText(c.detail, true)
+                )
+            }
         }
 
         // 4d. Keyword completions

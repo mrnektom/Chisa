@@ -10,7 +10,11 @@ import com.intellij.openapi.project.Project
 )
 class ZenScriptSettings : PersistentStateComponent<ZenScriptSettings.State> {
 
-    data class State(var stdlibPath: String = "")
+    data class State(
+        var stdlibPath: String = "",
+        var daemonPath: String = "",
+        var daemonPort: Int = 7654,
+    )
 
     private var myState = State()
 
@@ -23,6 +27,14 @@ class ZenScriptSettings : PersistentStateComponent<ZenScriptSettings.State> {
     var stdlibPath: String
         get() = myState.stdlibPath
         set(value) { myState.stdlibPath = value }
+
+    var daemonPath: String
+        get() = myState.daemonPath
+        set(value) { myState.daemonPath = value }
+
+    var daemonPort: Int
+        get() = myState.daemonPort
+        set(value) { myState.daemonPort = value }
 
     companion object {
         fun getInstance(project: Project): ZenScriptSettings =

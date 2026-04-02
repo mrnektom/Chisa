@@ -1,6 +1,6 @@
 
 
-fn get_ten(): number = 10
+fn getTen(): number = 10
 
 fn check(a: number): number {
   return if (a == 10) 1 else 0
@@ -12,7 +12,7 @@ fn add(a: number): number = a
 let t = true
 let f = false
 
-let a = get_ten()
+let a = getTen()
 
 print(a)
 a = 50

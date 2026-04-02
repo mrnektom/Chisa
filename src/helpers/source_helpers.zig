@@ -54,8 +54,8 @@ pub fn computeLineNumber(source: []const u8, pos: usize) usize {
     if (source.len == 0) return 0;
     const p = clampPos(source, pos);
     var number: usize = 0;
-    for (0..p + 1) |c| {
-        if (source[p - c] == '\n') {
+    for (0..p) |i| {
+        if (source[i] == '\n') {
             number += 1;
         }
     }

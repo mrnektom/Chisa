@@ -24,6 +24,7 @@ const ZSExprType = enum {
     index_access,
     enum_init,
     match_expr,
+    lambda,
 };
 
 pub const ZSExpr = union(ZSExprType) {
@@ -48,6 +49,7 @@ pub const ZSExpr = union(ZSExprType) {
     index_access: ZSIndexAccess,
     enum_init: ZSEnumInit,
     match_expr: ZSMatchExpr,
+    lambda: ZSLambda,
 
     pub fn deinit(self: *const @This(), allocator: std.mem.Allocator) void {
         switch (self.*) {
@@ -67,6 +69,7 @@ pub const ZSExpr = union(ZSExprType) {
             .enum_init => self.enum_init.deinit(allocator),
             .match_expr => self.match_expr.deinit(allocator),
             .number => self.number.deinit(allocator),
+            .lambda => self.lambda.deinit(allocator),
             .char, .boolean, .reference, .break_expr, .continue_expr => {},
         }
     }
@@ -107,6 +110,7 @@ pub const ZSExpr = union(ZSExprType) {
             .index_access => self.index_access.startPos,
             .enum_init => self.enum_init.startPos,
             .match_expr => self.match_expr.startPos,
+            .lambda => self.lambda.startPos,
         };
     }
 
@@ -133,6 +137,7 @@ pub const ZSExpr = union(ZSExprType) {
             .index_access => self.index_access.endPos,
             .enum_init => self.enum_init.endPos,
             .match_expr => self.match_expr.endPos,
+            .lambda => self.lambda.endPos,
         };
     }
 };
@@ -415,5 +420,22 @@ pub const ZSUnary = struct {
     pub fn deinit(self: *const @This(), allocator: std.mem.Allocator) void {
         self.operand.deinit(allocator);
         allocator.destroy(self.operand);
+    }
+};
+
+pub const ZSLambdaParam = struct {
+    name: []const u8,
+};
+
+pub const ZSLambda = struct {
+    params: []ZSLambdaParam,
+    body: *ZSExpr,
+    startPos: usize,
+    endPos: usize,
+
+    pub fn deinit(self: *const @This(), allocator: std.mem.Allocator) void {
+        allocator.free(self.params);
+        self.body.deinit(allocator);
+        allocator.destroy(self.body);
     }
 };

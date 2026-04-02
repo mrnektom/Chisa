@@ -302,36 +302,42 @@ object ZenScriptResolveUtil {
     }
 
     /**
+     * Given a sibling just before a struct literal's LBRACE, finds the REFERENCE_EXPRESSION
+     * for the struct name. Handles both plain (`Point { ... }`) and generic (`Pair<T, U> { ... }`)
+     * struct literals by skipping backwards over `> TypeName (, TypeName)* <` tokens.
+     */
+    fun findStructNameBeforeLbrace(lbrace: PsiElement): ZenScriptReferenceExpression? {
+        var node: PsiElement? = lbrace.prevSibling
+        while (node != null && node.node.elementType == TokenType.WHITE_SPACE) node = node.prevSibling
+        // Skip generic type args: > ... <
+        if (node?.node?.elementType == ZenScriptTokenTypes.GT) {
+            node = node.prevSibling
+            while (node != null && node.node.elementType != ZenScriptTokenTypes.LT) node = node.prevSibling
+            node = node?.prevSibling
+            while (node != null && node.node.elementType == TokenType.WHITE_SPACE) node = node.prevSibling
+        }
+        return node as? ZenScriptReferenceExpression
+    }
+
+    /**
      * Resolves a field name in a struct literal (e.g. `x` in `Point { x: 3 }`).
      * Returns the [ZenScriptStructField] declaration, or null if not applicable.
      */
     fun resolveStructLiteralField(element: ZenScriptReferenceExpression): ZenScriptStructField? {
         // Check: is this REFERENCE_EXPRESSION followed by COLON?
         var next: PsiElement? = element.nextSibling
-        while (next != null && next.node.elementType == TokenType.WHITE_SPACE) {
-            next = next.nextSibling
-        }
+        while (next != null && next.node.elementType == TokenType.WHITE_SPACE) next = next.nextSibling
         if (next?.node?.elementType != ZenScriptTokenTypes.COLON) return null
 
-        // Walk backwards from this element to find the LBRACE
+        // Walk backwards to find the LBRACE
         var prev: PsiElement? = element.prevSibling
-        while (prev != null && prev.node.elementType != ZenScriptTokenTypes.LBRACE) {
-            prev = prev.prevSibling
-        }
-        if (prev == null) return null // no LBRACE found
+        while (prev != null && prev.node.elementType != ZenScriptTokenTypes.LBRACE) prev = prev.prevSibling
+        if (prev == null) return null
 
-        // The REFERENCE_EXPRESSION before the LBRACE is the struct name
-        var structNameRef: PsiElement? = prev.prevSibling
-        while (structNameRef != null && structNameRef.node.elementType == TokenType.WHITE_SPACE) {
-            structNameRef = structNameRef.prevSibling
-        }
-        if (structNameRef !is ZenScriptReferenceExpression) return null
-
-        // Resolve the struct name to a declaration
+        val structNameRef = findStructNameBeforeLbrace(prev) ?: return null
         val structDecl = resolveInScope(structNameRef, structNameRef.getReferenceName() ?: return null)
         if (structDecl !is ZenScriptStructDeclaration) return null
 
-        // Find the field in the struct
         val fieldName = element.getReferenceName() ?: return null
         return findStructField(structDecl, fieldName)
     }

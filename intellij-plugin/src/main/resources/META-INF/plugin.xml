@@ -52,6 +52,13 @@
         <projectService
                 serviceImplementation="org.zenscript.intellij.settings.ZenScriptPreludeService"/>
 
+        <projectService
+                serviceImplementation="org.zenscript.intellij.daemon.DaemonService"/>
+
+        <externalAnnotator
+                language="ZenScript"
+                implementationClass="org.zenscript.intellij.daemon.DaemonAnnotator"/>
+
         <projectConfigurable
                 parentId="language"
                 instance="org.zenscript.intellij.settings.ZenScriptSettingsConfigurable"

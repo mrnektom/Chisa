@@ -29,10 +29,7 @@ class ZenScriptParser : PsiParser {
             ZenScriptTokenTypes.EXTERNAL -> parseFnDeclaration(b)
             ZenScriptTokenTypes.STRUCT -> parseStructDeclaration(b)
             ZenScriptTokenTypes.ENUM -> parseEnumDeclaration(b)
-            ZenScriptTokenTypes.PUB -> {
-                b.advanceLexer() // skip pub
-                if (!b.eof()) parseTopLevel(b)
-            }
+            ZenScriptTokenTypes.SCALAR -> parseScalarDeclaration(b)
             ZenScriptTokenTypes.EXPORT -> {
                 // Peek ahead: if next meaningful token is LBRACE, it's export-from
                 if (peekNextToken(b) == ZenScriptTokenTypes.LBRACE) {
@@ -52,7 +49,12 @@ class ZenScriptParser : PsiParser {
             }
             ZenScriptTokenTypes.IMPORT -> parseImportStatement(b)
             ZenScriptTokenTypes.USE -> parseUseStatement(b)
-            ZenScriptTokenTypes.IDENTIFIER -> parseExpressionStatement(b)
+            ZenScriptTokenTypes.AT -> parseAtTarget(b)
+            ZenScriptTokenTypes.TYPE_KW -> parseTypeAliasDeclaration(b)
+            ZenScriptTokenTypes.WHEN -> parseWhenExpression(b)
+            ZenScriptTokenTypes.ASM -> parseAsmStatement(b)
+            ZenScriptTokenTypes.IDENTIFIER,
+            ZenScriptTokenTypes.THIS_KW -> parseExpressionStatement(b)
             else -> {
                 b.error("Unexpected token: ${b.tokenType}")
                 b.advanceLexer()
@@ -72,6 +74,8 @@ class ZenScriptParser : PsiParser {
                 b.advanceLexer()
                 eatOptionalSemicolon(b)
             }
+            ZenScriptTokenTypes.WHEN -> parseWhenExpression(b)
+            ZenScriptTokenTypes.ASM -> parseAsmStatement(b)
             ZenScriptTokenTypes.LBRACE -> parseBlock(b)
             else -> parseExpressionStatement(b)
         }
@@ -108,12 +112,35 @@ class ZenScriptParser : PsiParser {
         if (b.tokenType == ZenScriptTokenTypes.FN) {
             b.advanceLexer() // eat fn
         }
+        var isExtension = false
         if (b.tokenType == ZenScriptTokenTypes.IDENTIFIER) {
-            b.advanceLexer() // eat name
+            b.advanceLexer() // eat receiver type name or function name
+            // Receiver may have generic params: fn Option<T>.method(...)
+            if (b.tokenType == ZenScriptTokenTypes.LT) {
+                val rollback = b.mark()
+                skipGenericParams(b)
+                if (b.tokenType == ZenScriptTokenTypes.DOT) {
+                    // confirmed: generic receiver + dot = extension function
+                    rollback.drop()
+                } else {
+                    // not extension — roll back and treat <...> as method generic params later
+                    rollback.rollbackTo()
+                }
+            }
+            // Check for extension function: fn TypeName.methodName(...)
+            if (b.tokenType == ZenScriptTokenTypes.DOT) {
+                isExtension = true
+                b.advanceLexer() // eat .
+                if (b.tokenType == ZenScriptTokenTypes.IDENTIFIER) {
+                    b.advanceLexer() // eat method name
+                } else {
+                    b.error("Expected method name after '.'")
+                }
+            }
         } else {
             b.error("Expected function name")
         }
-        // Optional generic params <T, U>
+        // Optional generic params <T, U> (method-level generics)
         if (b.tokenType == ZenScriptTokenTypes.LT) {
             skipGenericParams(b)
         }
@@ -134,7 +161,11 @@ class ZenScriptParser : PsiParser {
         } else if (b.tokenType == ZenScriptTokenTypes.LBRACE) {
             parseBlock(b)
         }
-        marker.done(ZenScriptElementTypes.FN_DECLARATION)
+        if (isExtension) {
+            marker.done(ZenScriptElementTypes.EXTENSION_FN_DECLARATION)
+        } else {
+            marker.done(ZenScriptElementTypes.FN_DECLARATION)
+        }
     }
 
     private fun parseStructDeclaration(b: PsiBuilder) {
@@ -252,26 +283,42 @@ class ZenScriptParser : PsiParser {
 
     private fun parseTypeReference(b: PsiBuilder) {
         val marker = b.mark()
-        if (b.tokenType == ZenScriptTokenTypes.IDENTIFIER) {
-            b.advanceLexer()
-        } else if (b.tokenType == ZenScriptTokenTypes.CHAR_KW) {
-            b.advanceLexer()
-        } else {
-            b.error("Expected type name")
-            marker.drop()
-            return
-        }
-        // Optional generic args <T, U>
-        if (b.tokenType == ZenScriptTokenTypes.LT) {
-            skipGenericParams(b)
-        }
-        // Optional array suffix: T[]
-        if (b.tokenType == ZenScriptTokenTypes.LBRACKET) {
-            b.advanceLexer() // eat [
-            if (b.tokenType == ZenScriptTokenTypes.RBRACKET) {
-                b.advanceLexer() // eat ]
-            } else {
-                b.error("Expected ']'")
+        when {
+            // Function type: (Type, ...) -> ReturnType
+            b.tokenType == ZenScriptTokenTypes.LPAREN -> {
+                b.advanceLexer() // eat (
+                while (!b.eof() && b.tokenType != ZenScriptTokenTypes.RPAREN) {
+                    parseTypeReference(b)
+                    if (b.tokenType == ZenScriptTokenTypes.COMMA) b.advanceLexer() else break
+                }
+                if (b.tokenType == ZenScriptTokenTypes.RPAREN) b.advanceLexer()
+                if (b.tokenType == ZenScriptTokenTypes.ARROW) {
+                    b.advanceLexer() // eat ->
+                    parseTypeReference(b) // return type
+                } else {
+                    b.error("Expected '->' in function type")
+                }
+            }
+            b.tokenType == ZenScriptTokenTypes.IDENTIFIER || b.tokenType == ZenScriptTokenTypes.CHAR_KW -> {
+                b.advanceLexer()
+                // Optional generic args <T, U>
+                if (b.tokenType == ZenScriptTokenTypes.LT) {
+                    skipGenericParams(b)
+                }
+                // Optional array suffix: T[]
+                if (b.tokenType == ZenScriptTokenTypes.LBRACKET) {
+                    b.advanceLexer() // eat [
+                    if (b.tokenType == ZenScriptTokenTypes.RBRACKET) {
+                        b.advanceLexer() // eat ]
+                    } else {
+                        b.error("Expected ']'")
+                    }
+                }
+            }
+            else -> {
+                b.error("Expected type name")
+                marker.drop()
+                return
             }
         }
         marker.done(ZenScriptElementTypes.TYPE_REFERENCE)
@@ -577,9 +624,10 @@ class ZenScriptParser : PsiParser {
 
     private fun parsePrimaryExpression(b: PsiBuilder) {
         when (b.tokenType) {
-            ZenScriptTokenTypes.IDENTIFIER -> {
+            ZenScriptTokenTypes.IDENTIFIER,
+            ZenScriptTokenTypes.THIS_KW -> {
                 val marker = b.mark()
-                b.advanceLexer() // eat identifier
+                b.advanceLexer() // eat identifier / this
                 marker.done(ZenScriptElementTypes.REFERENCE_EXPRESSION)
                 parseSuffix(b)
             }
@@ -594,13 +642,16 @@ class ZenScriptParser : PsiParser {
                 skipParenContent(b)
             }
             ZenScriptTokenTypes.LBRACKET -> {
-                skipBracketContent(b)
+                parseArrayLiteral(b)
             }
             ZenScriptTokenTypes.LBRACE -> {
-                parseBlock(b)
+                if (isLambdaStart(b)) parseLambdaExpression(b) else parseBlock(b)
             }
             ZenScriptTokenTypes.MATCH -> {
                 parseMatchExpression(b)
+            }
+            ZenScriptTokenTypes.WHEN -> {
+                parseWhenExpression(b)
             }
             ZenScriptTokenTypes.IF -> {
                 // inline if expression — delegate to if statement parsing
@@ -633,6 +684,34 @@ class ZenScriptParser : PsiParser {
                 ZenScriptTokenTypes.LBRACE -> {
                     // Struct literal: Name { field: value, ... }
                     parseStructLiteralBody(b)
+                }
+                ZenScriptTokenTypes.LT -> {
+                    // Generic struct literal: Name<T, U> { field: value, ... }
+                    // Speculatively skip generic args; if followed by '{' it's a struct literal.
+                    val rollback = b.mark()
+                    skipGenericParams(b)
+                    if (b.tokenType == ZenScriptTokenTypes.LBRACE) {
+                        rollback.drop()
+                        parseStructLiteralBody(b)
+                    } else {
+                        rollback.rollbackTo()
+                        break
+                    }
+                }
+                ZenScriptTokenTypes.QUEST_DOT -> {
+                    val safeMarker = b.mark()
+                    b.advanceLexer() // eat ?.
+                    if (b.tokenType == ZenScriptTokenTypes.IDENTIFIER) {
+                        val refMarker = b.mark()
+                        b.advanceLexer()
+                        refMarker.done(ZenScriptElementTypes.REFERENCE_EXPRESSION)
+                    }
+                    safeMarker.done(ZenScriptElementTypes.SAFE_NAVIGATION)
+                }
+                ZenScriptTokenTypes.BANG_BANG -> {
+                    val errMarker = b.mark()
+                    b.advanceLexer() // eat !!
+                    errMarker.done(ZenScriptElementTypes.ERROR_PROPAGATION)
                 }
                 else -> break
             }
@@ -698,10 +777,10 @@ class ZenScriptParser : PsiParser {
             ZenScriptTokenTypes.IDENTIFIER -> {
                 val nameMarker = b.mark()
                 b.advanceLexer() // eat name
-                nameMarker.done(ZenScriptElementTypes.REFERENCE_EXPRESSION)
                 when (b.tokenType) {
                     ZenScriptTokenTypes.DOT -> {
-                        // EnumName.Variant or EnumName.Variant(bindings)
+                        // EnumName.Variant or EnumName.Variant(payload bindings)
+                        nameMarker.done(ZenScriptElementTypes.REFERENCE_EXPRESSION)
                         b.advanceLexer() // eat .
                         if (b.tokenType == ZenScriptTokenTypes.IDENTIFIER) {
                             val varMarker = b.mark()
@@ -709,14 +788,18 @@ class ZenScriptParser : PsiParser {
                             varMarker.done(ZenScriptElementTypes.REFERENCE_EXPRESSION)
                         }
                         if (b.tokenType == ZenScriptTokenTypes.LPAREN) {
-                            skipParenContent(b)
+                            parseEnumPayloadPattern(b)
                         }
                     }
                     ZenScriptTokenTypes.LBRACE -> {
                         // StructName { field: val, field2 }
-                        skipBraceContent(b)
+                        nameMarker.done(ZenScriptElementTypes.REFERENCE_EXPRESSION)
+                        parseStructPatternBody(b)
                     }
-                    else -> { /* plain binding identifier */ }
+                    else -> {
+                        // Plain binding identifier — binds the matched value to a variable
+                        nameMarker.done(ZenScriptElementTypes.MATCH_BINDING)
+                    }
                 }
             }
             else -> {
@@ -724,6 +807,90 @@ class ZenScriptParser : PsiParser {
                 b.advanceLexer()
             }
         }
+    }
+
+    /** Parses `(binding1, binding2, ...)` in an enum variant pattern. Each identifier becomes a MATCH_BINDING. */
+    private fun parseEnumPayloadPattern(b: PsiBuilder) {
+        b.advanceLexer() // eat (
+        while (!b.eof() && b.tokenType != ZenScriptTokenTypes.RPAREN) {
+            if (b.tokenType == ZenScriptTokenTypes.IDENTIFIER) {
+                val bindMarker = b.mark()
+                b.advanceLexer()
+                bindMarker.done(ZenScriptElementTypes.MATCH_BINDING)
+            } else {
+                b.error("Expected binding name")
+                b.advanceLexer()
+            }
+            if (b.tokenType == ZenScriptTokenTypes.COMMA) b.advanceLexer()
+        }
+        if (b.tokenType == ZenScriptTokenTypes.RPAREN) b.advanceLexer()
+    }
+
+    /** Parses `{ field: value, field2, ... }` in a struct pattern.
+     *  `field: value` — valued field (reference + skip expression), `field2` alone — MATCH_BINDING. */
+    private fun parseStructPatternBody(b: PsiBuilder) {
+        b.advanceLexer() // eat {
+        while (!b.eof() && b.tokenType != ZenScriptTokenTypes.RBRACE) {
+            if (b.tokenType == ZenScriptTokenTypes.IDENTIFIER) {
+                val fieldMarker = b.mark()
+                b.advanceLexer() // eat field name
+                if (b.tokenType == ZenScriptTokenTypes.COLON) {
+                    // field: value — reference expression, not a binding
+                    fieldMarker.done(ZenScriptElementTypes.REFERENCE_EXPRESSION)
+                    b.advanceLexer() // eat :
+                    parseExpression(b)
+                } else {
+                    // bare field name — binds the field value to a variable
+                    fieldMarker.done(ZenScriptElementTypes.MATCH_BINDING)
+                }
+            } else {
+                b.error("Expected field name")
+                b.advanceLexer()
+            }
+            if (b.tokenType == ZenScriptTokenTypes.COMMA) b.advanceLexer()
+        }
+        if (b.tokenType == ZenScriptTokenTypes.RBRACE) b.advanceLexer()
+    }
+
+    private fun parseScalarDeclaration(b: PsiBuilder) {
+        val marker = b.mark()
+        b.advanceLexer() // eat scalar
+        if (b.tokenType == ZenScriptTokenTypes.IDENTIFIER) {
+            b.advanceLexer() // eat name
+        } else {
+            b.error("Expected scalar type name")
+        }
+        eatOptionalSemicolon(b)
+        marker.done(ZenScriptElementTypes.SCALAR_DECLARATION)
+    }
+
+    private fun parseArrayLiteral(b: PsiBuilder) {
+        val marker = b.mark()
+        b.advanceLexer() // eat [
+        if (!b.eof() && b.tokenType != ZenScriptTokenTypes.RBRACKET) {
+            parseExpression(b)
+            when {
+                // [expr; count] — repeat literal
+                b.tokenType == ZenScriptTokenTypes.SEMICOLON -> {
+                    b.advanceLexer() // eat ;
+                    parseExpression(b) // eat count
+                }
+                // [expr, expr, ...] — list literal
+                b.tokenType == ZenScriptTokenTypes.COMMA -> {
+                    while (b.tokenType == ZenScriptTokenTypes.COMMA) {
+                        b.advanceLexer()
+                        if (b.tokenType == ZenScriptTokenTypes.RBRACKET) break
+                        parseExpression(b)
+                    }
+                }
+            }
+        }
+        if (b.tokenType == ZenScriptTokenTypes.RBRACKET) {
+            b.advanceLexer()
+        } else {
+            b.error("Expected ']'")
+        }
+        marker.done(ZenScriptElementTypes.ARRAY_LITERAL)
     }
 
     // --- Helpers ---
@@ -802,6 +969,200 @@ class ZenScriptParser : PsiParser {
         if (b.tokenType == ZenScriptTokenTypes.SEMICOLON) {
             b.advanceLexer()
         }
+    }
+
+    // --- New constructs ---
+
+    private fun parseAtTarget(b: PsiBuilder) {
+        val marker = b.mark()
+        b.advanceLexer() // eat @
+        // expect `target` identifier
+        if (b.tokenType == ZenScriptTokenTypes.IDENTIFIER) {
+            b.advanceLexer()
+        } else {
+            b.error("Expected 'target' after '@'")
+        }
+        if (b.tokenType == ZenScriptTokenTypes.LPAREN) {
+            b.advanceLexer() // eat (
+            // condition expression (identifiers, ==, &&, ||, strings, !)
+            parseExpression(b)
+            if (b.tokenType == ZenScriptTokenTypes.RPAREN) b.advanceLexer()
+        }
+        eatOptionalSemicolon(b)
+        marker.done(ZenScriptElementTypes.AT_TARGET)
+    }
+
+    private fun parseTypeAliasDeclaration(b: PsiBuilder) {
+        val marker = b.mark()
+        b.advanceLexer() // eat type
+        if (b.tokenType == ZenScriptTokenTypes.IDENTIFIER) {
+            b.advanceLexer() // eat alias name
+        } else {
+            b.error("Expected type alias name")
+        }
+        if (b.tokenType == ZenScriptTokenTypes.LT) {
+            skipGenericParams(b)
+        }
+        if (b.tokenType == ZenScriptTokenTypes.EQ) {
+            b.advanceLexer() // eat =
+            parseTypeReference(b)
+        } else {
+            b.error("Expected '='")
+        }
+        eatOptionalSemicolon(b)
+        marker.done(ZenScriptElementTypes.TYPE_ALIAS_DECLARATION)
+    }
+
+    /**
+     * Speculatively checks if the `{` at current position starts a lambda.
+     * A lambda has the form: `{` (`->` | params `->`) body `}`
+     * where params = `ident (: Type)? (, ident (: Type)?)*`
+     */
+    private fun isLambdaStart(b: PsiBuilder): Boolean {
+        val rollback = b.mark()
+        b.advanceLexer() // eat {
+        // { -> ... } — zero-param lambda
+        val result = if (b.tokenType == ZenScriptTokenTypes.ARROW) {
+            true
+        } else {
+            // Try to parse: (ident (: Type)? ,)* ident (: Type)? ->
+            var found = false
+            loop@ while (!b.eof() && b.tokenType != ZenScriptTokenTypes.RBRACE) {
+                if (b.tokenType != ZenScriptTokenTypes.IDENTIFIER) break@loop
+                b.advanceLexer() // eat param name
+                if (b.tokenType == ZenScriptTokenTypes.COLON) {
+                    b.advanceLexer() // eat :
+                    // skip type tokens: ident, optional <...>, optional []
+                    if (b.tokenType == ZenScriptTokenTypes.IDENTIFIER || b.tokenType == ZenScriptTokenTypes.CHAR_KW) {
+                        b.advanceLexer()
+                        if (b.tokenType == ZenScriptTokenTypes.LT) skipGenericParams(b)
+                        if (b.tokenType == ZenScriptTokenTypes.LBRACKET) {
+                            b.advanceLexer()
+                            if (b.tokenType == ZenScriptTokenTypes.RBRACKET) b.advanceLexer()
+                        }
+                    }
+                }
+                when (b.tokenType) {
+                    ZenScriptTokenTypes.ARROW -> { found = true; break@loop }
+                    ZenScriptTokenTypes.COMMA -> b.advanceLexer()
+                    else -> break@loop
+                }
+            }
+            found
+        }
+        rollback.rollbackTo()
+        return result
+    }
+
+    private fun parseLambdaExpression(b: PsiBuilder) {
+        val marker = b.mark()
+        b.advanceLexer() // eat {
+        // Parse params (may be empty) before ->
+        while (!b.eof() && b.tokenType != ZenScriptTokenTypes.ARROW && b.tokenType != ZenScriptTokenTypes.RBRACE) {
+            if (b.tokenType == ZenScriptTokenTypes.IDENTIFIER) {
+                val paramMarker = b.mark()
+                b.advanceLexer() // eat param name
+                if (b.tokenType == ZenScriptTokenTypes.COLON) {
+                    b.advanceLexer()
+                    parseTypeReference(b)
+                }
+                paramMarker.done(ZenScriptElementTypes.LAMBDA_PARAM)
+            }
+            if (b.tokenType == ZenScriptTokenTypes.COMMA) b.advanceLexer() else break
+        }
+        if (b.tokenType == ZenScriptTokenTypes.ARROW) b.advanceLexer() // eat ->
+        // Parse body statements
+        while (!b.eof() && b.tokenType != ZenScriptTokenTypes.RBRACE) {
+            val before = b.currentOffset
+            parseStatement(b)
+            if (b.currentOffset == before) {
+                b.error("Unexpected token: ${b.tokenType}")
+                b.advanceLexer()
+            }
+        }
+        if (b.tokenType == ZenScriptTokenTypes.RBRACE) b.advanceLexer()
+        marker.done(ZenScriptElementTypes.LAMBDA_EXPRESSION)
+    }
+
+    private fun parseWhenExpression(b: PsiBuilder) {
+        val marker = b.mark()
+        b.advanceLexer() // eat when
+        if (b.tokenType == ZenScriptTokenTypes.LBRACE) {
+            b.advanceLexer() // eat {
+            while (!b.eof() && b.tokenType != ZenScriptTokenTypes.RBRACE) {
+                val armMarker = b.mark()
+                // condition or else
+                if (b.tokenType == ZenScriptTokenTypes.ELSE) {
+                    b.advanceLexer()
+                } else {
+                    parseExpression(b)
+                }
+                if (b.tokenType == ZenScriptTokenTypes.ARROW) {
+                    b.advanceLexer() // eat ->
+                    // arm body: declaration or expression
+                    if (!b.eof() && b.tokenType != ZenScriptTokenTypes.RBRACE &&
+                        b.tokenType != ZenScriptTokenTypes.COMMA) {
+                        parseStatement(b)
+                    }
+                } else {
+                    b.error("Expected '->'")
+                }
+                if (b.tokenType == ZenScriptTokenTypes.COMMA) b.advanceLexer()
+                armMarker.done(ZenScriptElementTypes.WHEN_ARM)
+            }
+            if (b.tokenType == ZenScriptTokenTypes.RBRACE) b.advanceLexer()
+        }
+        marker.done(ZenScriptElementTypes.WHEN_EXPRESSION)
+    }
+
+    private fun parseAsmStatement(b: PsiBuilder) {
+        val marker = b.mark()
+        b.advanceLexer() // eat asm
+        if (b.tokenType == ZenScriptTokenTypes.LBRACE) {
+            b.advanceLexer() // eat {
+            while (!b.eof() && b.tokenType != ZenScriptTokenTypes.RBRACE) {
+                when (b.tokenType) {
+                    ZenScriptTokenTypes.IN_KW -> {
+                        val bm = b.mark()
+                        b.advanceLexer() // eat in
+                        if (b.tokenType == ZenScriptTokenTypes.IDENTIFIER) b.advanceLexer() // reg
+                        if (b.tokenType == ZenScriptTokenTypes.EQ) b.advanceLexer()
+                        parseExpression(b)
+                        bm.done(ZenScriptElementTypes.ASM_BINDING)
+                    }
+                    ZenScriptTokenTypes.OUT_KW -> {
+                        val bm = b.mark()
+                        b.advanceLexer() // eat out
+                        if (b.tokenType == ZenScriptTokenTypes.IDENTIFIER) b.advanceLexer() // reg
+                        if (b.tokenType == ZenScriptTokenTypes.EQ) b.advanceLexer()
+                        if (b.tokenType == ZenScriptTokenTypes.IDENTIFIER) {
+                            val nm = b.mark()
+                            b.advanceLexer()
+                            nm.done(ZenScriptElementTypes.REFERENCE_EXPRESSION)
+                        }
+                        bm.done(ZenScriptElementTypes.ASM_BINDING)
+                    }
+                    ZenScriptTokenTypes.CLOBBER_KW -> {
+                        val bm = b.mark()
+                        b.advanceLexer() // eat clobber
+                        while (!b.eof() && b.tokenType == ZenScriptTokenTypes.IDENTIFIER) {
+                            b.advanceLexer()
+                            if (b.tokenType == ZenScriptTokenTypes.COMMA) b.advanceLexer() else break
+                        }
+                        bm.done(ZenScriptElementTypes.ASM_BINDING)
+                    }
+                    ZenScriptTokenTypes.STRING_LITERAL -> {
+                        b.advanceLexer() // assembly instruction string
+                    }
+                    else -> {
+                        b.error("Unexpected token in asm block")
+                        b.advanceLexer()
+                    }
+                }
+            }
+            if (b.tokenType == ZenScriptTokenTypes.RBRACE) b.advanceLexer()
+        }
+        marker.done(ZenScriptElementTypes.ASM_STATEMENT)
     }
 
 }

@@ -20,6 +20,7 @@ dependencies {
         instrumentationTools()
         testFramework(org.jetbrains.intellij.platform.gradle.TestFrameworkType.Platform)
     }
+    implementation("org.json:json:20240303")
     testImplementation("junit:junit:4.13.2")
 }
 
@@ -30,6 +31,6 @@ kotlin {
 tasks {
     patchPluginXml {
         sinceBuild.set("241")
-        untilBuild.set("251.*")
+        untilBuild.set("253.*")
     }
 }

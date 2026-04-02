@@ -26,6 +26,7 @@ class ZenScriptSyntaxHighlighter : SyntaxHighlighterBase() {
         val FUNCTION_NAME = createTextAttributesKey("ZENSCRIPT_FUNCTION_NAME", DefaultLanguageHighlighterColors.FUNCTION_DECLARATION)
         val FUNCTION_CALL = createTextAttributesKey("ZENSCRIPT_FUNCTION_CALL", DefaultLanguageHighlighterColors.FUNCTION_CALL)
         val FIELD_NAME = createTextAttributesKey("ZENSCRIPT_FIELD_NAME", DefaultLanguageHighlighterColors.INSTANCE_FIELD)
+        val ENUM_VARIANT_NAME = createTextAttributesKey("ZENSCRIPT_ENUM_VARIANT_NAME", DefaultLanguageHighlighterColors.STATIC_FIELD)
         val BAD_CHARACTER = createTextAttributesKey("ZENSCRIPT_BAD_CHARACTER", DefaultLanguageHighlighterColors.INVALID_STRING_ESCAPE)
 
         private val KEYWORD_KEYS = arrayOf(KEYWORD)

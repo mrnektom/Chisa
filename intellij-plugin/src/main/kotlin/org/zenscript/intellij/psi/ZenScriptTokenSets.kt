@@ -11,7 +11,10 @@ object ZenScriptTokenSets {
         ZenScriptTokenTypes.ENUM, ZenScriptTokenTypes.EXTERNAL, ZenScriptTokenTypes.IMPORT,
         ZenScriptTokenTypes.EXPORT, ZenScriptTokenTypes.FROM, ZenScriptTokenTypes.AS,
         ZenScriptTokenTypes.USE, ZenScriptTokenTypes.TRUE, ZenScriptTokenTypes.FALSE,
-        ZenScriptTokenTypes.CHAR_KW, ZenScriptTokenTypes.PUB
+        ZenScriptTokenTypes.CHAR_KW, ZenScriptTokenTypes.SCALAR,
+        ZenScriptTokenTypes.WHEN, ZenScriptTokenTypes.ASM, ZenScriptTokenTypes.TYPE_KW,
+        ZenScriptTokenTypes.IN_KW, ZenScriptTokenTypes.OUT_KW, ZenScriptTokenTypes.CLOBBER_KW,
+        ZenScriptTokenTypes.THIS_KW
     )
 
     @JvmField val OPERATORS = TokenSet.create(
@@ -21,7 +24,8 @@ object ZenScriptTokenSets {
         ZenScriptTokenTypes.LT_EQ, ZenScriptTokenTypes.GT_EQ,
         ZenScriptTokenTypes.LT, ZenScriptTokenTypes.GT,
         ZenScriptTokenTypes.EQ, ZenScriptTokenTypes.AND_AND, ZenScriptTokenTypes.OR_OR,
-        ZenScriptTokenTypes.BANG, ZenScriptTokenTypes.ARROW, ZenScriptTokenTypes.DOT
+        ZenScriptTokenTypes.BANG, ZenScriptTokenTypes.ARROW, ZenScriptTokenTypes.DOT,
+        ZenScriptTokenTypes.QUEST_DOT, ZenScriptTokenTypes.BANG_BANG
     )
 
     @JvmField val STRINGS = TokenSet.create(ZenScriptTokenTypes.STRING_LITERAL)
@@ -53,7 +57,14 @@ object ZenScriptTokenTypes {
     @JvmField val TRUE = ZenScriptTokenType("TRUE")
     @JvmField val FALSE = ZenScriptTokenType("FALSE")
     @JvmField val CHAR_KW = ZenScriptTokenType("CHAR_KW")
-    @JvmField val PUB = ZenScriptTokenType("PUB")
+    @JvmField val SCALAR = ZenScriptTokenType("SCALAR")
+    @JvmField val WHEN = ZenScriptTokenType("WHEN")
+    @JvmField val ASM = ZenScriptTokenType("ASM")
+    @JvmField val TYPE_KW = ZenScriptTokenType("TYPE_KW")
+    @JvmField val IN_KW = ZenScriptTokenType("IN_KW")
+    @JvmField val OUT_KW = ZenScriptTokenType("OUT_KW")
+    @JvmField val CLOBBER_KW = ZenScriptTokenType("CLOBBER_KW")
+    @JvmField val THIS_KW = ZenScriptTokenType("THIS_KW")
 
     // Literals
     @JvmField val NUMBER_LITERAL = ZenScriptTokenType("NUMBER_LITERAL")
@@ -79,6 +90,9 @@ object ZenScriptTokenTypes {
     @JvmField val OR_OR = ZenScriptTokenType("OR_OR")
     @JvmField val ARROW = ZenScriptTokenType("ARROW")
     @JvmField val DOT = ZenScriptTokenType("DOT")
+    @JvmField val QUEST_DOT = ZenScriptTokenType("QUEST_DOT")
+    @JvmField val BANG_BANG = ZenScriptTokenType("BANG_BANG")
+    @JvmField val AT = ZenScriptTokenType("AT")
 
     // Delimiters
     @JvmField val LPAREN = ZenScriptTokenType("LPAREN")
@@ -104,6 +118,9 @@ object ZenScriptTokenTypes {
         "enum" to ENUM, "external" to EXTERNAL, "import" to IMPORT,
         "export" to EXPORT, "from" to FROM, "as" to AS,
         "use" to USE, "true" to TRUE, "false" to FALSE,
-        "char" to CHAR_KW, "pub" to PUB
+        "char" to CHAR_KW, "scalar" to SCALAR,
+        "when" to WHEN, "asm" to ASM, "type" to TYPE_KW,
+        "in" to IN_KW, "out" to OUT_KW, "clobber" to CLOBBER_KW,
+        "this" to THIS_KW
     )
 }

@@ -44,7 +44,7 @@ fn currentTokenType(self: *Tokenizer) Error!?TokenType {
         '(', ')', ':', '{', '}', ',', '.', ';' => .punctuation,
         '[', ']' => .punctuation,
         '+', '-', '*', '/', '%', '>', '<' => .punctuation,
-        '&', '|' => .punctuation,
+        '?', '&', '|' => .punctuation,
         '"' => .string,
         '\'' => .char_literal,
         else => e: {
@@ -52,6 +52,10 @@ fn currentTokenType(self: *Tokenizer) Error!?TokenType {
                 break :e TokenType.numeric;
             }
             if (std.ascii.isAlphabetic(firstChar) or firstChar == '_') {
+                break :e TokenType.ident;
+            }
+            // '@' followed by an alphabetic char starts a directive ident (e.g. @target)
+            if (firstChar == '@' and self.position + 1 < self.input.len and std.ascii.isAlphabetic(self.input[self.position + 1])) {
                 break :e TokenType.ident;
             }
             if (std.ascii.isWhitespace(firstChar)) {
@@ -142,7 +146,7 @@ fn eatPunc(self: *Tokenizer) void {
         },
         '!' => {
             self.shift();
-            if (self.peek() == @as(u8, '=')) self.shift();
+            if (self.peek() == @as(u8, '!')) self.shift() else if (self.peek() == @as(u8, '=')) self.shift();
         },
         '>' => {
             self.shift();
@@ -163,6 +167,10 @@ fn eatPunc(self: *Tokenizer) void {
         '|' => {
             self.shift();
             if (self.peek() == @as(u8, '|')) self.shift();
+        },
+        '?' => {
+            self.shift();
+            if (self.peek() == @as(u8, '.')) self.shift();
         },
         '(', ')', ':', '{', '}', ',', '.', ';', '+', '*', '/', '%', '[', ']' => self.shift(),
 
