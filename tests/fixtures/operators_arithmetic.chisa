@@ -1,0 +1,12 @@
+let a = 10
+let b = 3
+let s = a + b
+let d = a - b
+let p = a * b
+let q = a / b
+let r = a % b
+print(s)
+print(d)
+print(p)
+print(q)
+print(r)

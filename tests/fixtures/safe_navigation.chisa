@@ -1,0 +1,9 @@
+import { Option } from "../../stdlib/Option.zs"
+
+struct Address { city: number }
+struct User { name: number, address: Option<Address> }
+
+let addr = Option.Some(Address { city: 42 })
+let user = Option.Some(User { name: 1, address: addr })
+
+let city = user?.address?.city

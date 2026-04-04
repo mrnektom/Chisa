@@ -1,0 +1,9 @@
+let x = 10
+let y = if (x > 5) 1 else 0
+print(y)
+
+if (x == 10) {
+    print(x)
+} else {
+    print(0)
+}

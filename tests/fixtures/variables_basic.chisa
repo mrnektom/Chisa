@@ -1,0 +1,6 @@
+let a = 42
+let b: number = 10
+const c = 100
+print(a)
+print(b)
+print(c)

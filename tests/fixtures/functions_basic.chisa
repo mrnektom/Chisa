@@ -1,0 +1,7 @@
+fn square(n: number): number = n * n
+
+fn greet(): number = 42
+
+let result = square(4)
+print(result)
+print(greet())

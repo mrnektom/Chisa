@@ -1,0 +1,9 @@
+fn wrap<T>(x: T): T = x
+
+struct Box<T> { value: T }
+
+enum Maybe<T> { Just(T), Nothing }
+
+let b = Box { value: 10 }
+let m = Maybe.Just(5)
+print(b.value)

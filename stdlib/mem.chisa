@@ -1,0 +1,23 @@
+export fn alloc(size: long): Pointer<char> {
+  asm {
+    in rax = 9
+    in rdi = 0
+    in rsi = size
+    in rdx = 3
+    in r10 = 34
+    in r8 = -1
+    in r9 = 0
+    out rax = addr
+    "syscall"
+  }
+  return addr
+}
+
+export fn free(addr: long, size: long): void {
+  asm {
+    in rax = 11
+    in rdi = addr
+    in rsi = size
+    "syscall"
+  }
+}

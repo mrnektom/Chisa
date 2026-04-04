@@ -1,0 +1,6 @@
+fn addNumbers(a: number, b: number): number = a + b
+fn isPositive(n: number): boolean = n > 0
+
+let x: number = 10
+let flag: boolean = true
+print(x)

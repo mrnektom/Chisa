@@ -1,0 +1,7 @@
+fn compute(x: number): number = {
+    let tmp = x * x
+    tmp + 1
+}
+
+let r = compute(4)
+print(r)

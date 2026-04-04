@@ -1,0 +1,10 @@
+when {
+    os == "linux" -> fn platformPrint(): void {
+        asm {
+            in rax = 1
+            in rdi = 1
+            "syscall"
+        }
+    }
+    else -> fn platformPrint(): void { }
+}

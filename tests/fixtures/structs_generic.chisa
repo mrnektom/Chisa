@@ -1,0 +1,5 @@
+struct Pair<T, U> { first: T, second: U }
+
+let p: Pair<number, number> = Pair { first: 1, second: 2 }
+print(p.first)
+print(p.second)

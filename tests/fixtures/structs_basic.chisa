@@ -1,0 +1,6 @@
+struct Point { x: number, y: number }
+
+let p = Point { x: 10, y: 20 }
+let xVal = p.x
+print(xVal)
+print(p.y)

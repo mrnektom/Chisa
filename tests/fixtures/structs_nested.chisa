@@ -1,0 +1,6 @@
+struct Inner { val: number }
+struct Outer { inner: Inner }
+
+let i = Inner { val: 42 }
+let o = Outer { inner: i }
+print(o.inner.val)

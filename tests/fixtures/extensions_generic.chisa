@@ -1,0 +1,10 @@
+enum MyOption<T> { Some(T), None }
+
+fn MyOption<T>.getOrElse(default: T): T = match this {
+    MyOption.Some(v) -> v,
+    MyOption.None -> default
+}
+
+let x = MyOption.Some(42)
+let v = x.getOrElse(0)
+print(v)

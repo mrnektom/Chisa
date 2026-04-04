@@ -1,0 +1,7 @@
+fn abs(x: number): number {
+    if (x < 0) return 0 - x
+    return x
+}
+
+let r = abs(0 - 5)
+print(r)

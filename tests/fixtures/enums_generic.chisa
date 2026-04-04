@@ -1,0 +1,10 @@
+enum MyResult<T> { Ok(T), Err(number) }
+
+let ok: MyResult<number> = MyResult.Ok(100)
+let err: MyResult<number> = MyResult.Err(1)
+
+let r = match ok {
+    MyResult.Ok(v) -> v,
+    MyResult.Err(e) -> 0 - e
+}
+print(r)

@@ -1,0 +1,61 @@
+import { Option } from "./Option.zs"
+import { Either } from "./Either.zs"
+import { List, newList } from "./arraylist.zs"
+import { free, alloc } from "./mem.zs"
+import { strConcat, String } from "./String.zs"
+export { print } from "./fs.zs"
+
+scalar number
+scalar long
+scalar short
+scalar byte
+scalar boolean
+scalar char
+
+struct Pointer<T> {
+    ptr: long
+}
+
+external fn loadLibrary(path: String): void
+
+external fn ptr<T>(value: T): Pointer<T>
+external fn deref<T>(ptr: Pointer<T>): T
+
+
+export fn numberToString(n: number): String {
+  let buf = ['\0'; 20]
+  let pos = 19
+  let is_neg = 0
+  let val = n
+
+  if (n < 0) {
+    is_neg = 1
+    val = 0 - n
+  }
+
+  if (val == 0) {
+    buf[pos] = 48
+    pos = pos - 1
+  }
+
+  while (val > 0) {
+    let digit = val % 10
+    buf[pos] = digit + 48
+    pos = pos - 1
+    val = val / 10
+  }
+
+  if (is_neg == 1) {
+    buf[pos] = 45
+    pos = pos - 1
+  }
+
+  let start = pos + 1
+  let len = 20 - start
+  let result: Pointer<char> = alloc(len)
+  for (let i = 0; i < len; i = i + 1) {
+    result[i] = buf[start + i]
+  }
+  return String { len: len, data: result }
+}
+

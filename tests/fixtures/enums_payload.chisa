@@ -1,0 +1,10 @@
+enum MyOption { Some(number), None }
+
+let x = MyOption.Some(42)
+let y = MyOption.None
+
+let r = match x {
+    MyOption.Some(v) -> v,
+    MyOption.None -> 0
+}
+print(r)

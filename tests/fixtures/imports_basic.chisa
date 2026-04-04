@@ -1,0 +1,4 @@
+import { add, multiply } from "./imports_lib.zs"
+
+let r1 = add(3, 4)
+let r2 = multiply(3, 4)

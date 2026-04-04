@@ -1,0 +1,9 @@
+@target(os == "linux")
+
+fn exit(): void {
+    asm {
+        in rax = 60
+        in rdi = 0
+        "syscall"
+    }
+}

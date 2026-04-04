@@ -1,0 +1,3 @@
+let double = { x -> x + x }
+let result = double(5)
+print(result)

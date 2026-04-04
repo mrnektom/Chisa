@@ -1,0 +1,4 @@
+let compute = { x ->
+    let tmp = x * x
+    tmp + 1
+}

@@ -1,0 +1,2 @@
+let double: (number) -> number = { x -> x * 2 }
+let add: (number, number) -> number = { a, b -> a + b }

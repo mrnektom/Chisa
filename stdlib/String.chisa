@@ -1,0 +1,44 @@
+import { alloc } from "./mem.zs"
+export struct String {
+    len: number,
+    data: Pointer<char>
+}
+
+export fn charAt(s: String, i: number): char = s.data[i]
+
+export fn toCstr(s: String): Pointer<char> {
+  let buf: Pointer<char> = alloc(s.len + 1)
+  for (let i = 0; i < s.len; i = i + 1) {
+    buf[i] = charAt(s, i)
+  }
+  buf[s.len] = '\0'
+  return buf
+}
+
+export fn strEq(a: String, b: String): boolean {
+  if (a.len != b.len) return false
+  for (let i = 0; i < a.len; i = i + 1) {
+    if (charAt(a, i) != charAt(b, i)) return false
+  }
+  return true
+}
+
+export fn strConcat(a: String, b: String): String {
+  let total = a.len + b.len
+  let buf = alloc(total)
+  for (let i = 0; i < a.len; i = i + 1) {
+    buf[i] = charAt(a, i)
+  }
+  for (let i = 0; i < b.len; i = i + 1) {
+    buf[a.len + i] = charAt(b, i)
+  }
+  return String { len: total, data: buf }
+}
+
+export fn substr(s: String, start: number, length: number): String {
+  let buf = alloc(length)
+  for (let i = 0; i < length; i = i + 1) {
+    buf[i] = charAt(s, start + i)
+  }
+  return String { len: length, data: buf }
+}

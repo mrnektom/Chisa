@@ -1,0 +1,142 @@
+import { String, charAt } from "./String.zs"
+import { alloc, free } from "./mem.zs"
+import { Either } from "./Either.zs"
+import { open, close, writeFd, readFd, FsError, O_RDONLY, O_WRITE_NEW, MODE_DEFAULT } from "./fs.zs"
+
+export struct BufWriter {
+  fd: number
+  buf: Pointer<char>
+  pos: number
+  cap: number
+}
+
+export struct BufReader {
+  fd: number
+  buf: Pointer<char>
+  pos: number
+  len: number
+  cap: number
+}
+
+export struct ReadLineResult {
+  reader: BufReader
+  line: String
+  eof: boolean
+}
+
+export fn newBufWriter(fd: number): BufWriter {
+  let cap = 4096
+  let buf: Pointer<char> = alloc(cap)
+  return BufWriter { fd: fd, buf: buf, pos: 0, cap: cap }
+}
+
+export fn openBufWriter(path: String): Either<FsError, BufWriter> {
+  let fd = open(path, O_WRITE_NEW, MODE_DEFAULT)!!
+  return Either.Right(newBufWriter(fd))
+}
+
+export fn newBufReader(fd: number): BufReader {
+  let cap = 4096
+  let buf: Pointer<char> = alloc(cap)
+  return BufReader { fd: fd, buf: buf, pos: 0, len: 0, cap: cap }
+}
+
+export fn openBufReader(path: String): Either<FsError, BufReader> {
+  let fd = open(path, O_RDONLY, 0)!!
+  return Either.Right(newBufReader(fd))
+}
+
+export fn BufWriter.flush(): BufWriter {
+  if (this.pos > 0) {
+    let data = String { len: this.pos, data: this.buf }
+    writeFd(this.fd, data)
+  }
+  return BufWriter { fd: this.fd, buf: this.buf, pos: 0, cap: this.cap }
+}
+
+export fn BufWriter.write( s: String): BufWriter {
+  let w = this
+  let i = 0
+  while (i < s.len) {
+    if (w.pos >= w.cap) {
+      w = w.flush()
+    }
+    let buf = w.buf
+    buf[w.pos] = charAt(s, i)
+    w = BufWriter { fd: w.fd, buf: buf, pos: w.pos + 1, cap: w.cap }
+    i = i + 1
+  }
+  return w
+}
+
+export fn BufWriter.writeln(s: String): BufWriter {
+  let w = this.write(s)
+  if (w.pos >= w.cap) {
+    w = w.flush()
+  }
+  let buf = w.buf
+  buf[w.pos] = '\n'
+  return BufWriter { fd: w.fd, buf: buf, pos: w.pos + 1, cap: w.cap }
+}
+
+export fn BufWriter.close(): void {
+  let w = this.flush()
+  close(w.fd)
+  free(w.buf, w.cap)
+}
+
+export fn BufReader.fill(): BufReader {
+  let buf = this.buf
+  let bytes = readFd(this.fd, buf, this.cap)
+  if (bytes < 0) {
+    bytes = 0
+  }
+  return BufReader { fd: this.fd, buf: buf, pos: 0, len: bytes, cap: this.cap }
+}
+
+export fn BufReader.readLine(): ReadLineResult {
+  let r = this
+  if (r.pos >= r.len) {
+    r = r.fill()
+  }
+  if (r.len == 0) {
+    return ReadLineResult {
+      reader: r,
+      line: String { len: 0, data: 0 },
+      eof: true
+    }
+  }
+  let start = r.pos
+  let end = r.pos
+  while (end < r.len) {
+    let buf = r.buf
+    if (buf[end] == '\n') {
+      end = end + 1
+      break
+    }
+    end = end + 1
+  }
+  let line_len = end - start
+  if (line_len > 0) {
+    let rbuf = r.buf
+    if (rbuf[end - 1] == '\n') {
+      line_len = line_len - 1
+    }
+  }
+  let line_buf: Pointer<char> = alloc(line_len)
+  let rbuf = r.buf
+  for (let i = 0; i < line_len; i = i + 1) {
+    line_buf[i] = rbuf[start + i]
+  }
+  let next_r = BufReader { fd: r.fd, buf: r.buf, pos: end, len: r.len, cap: r.cap }
+  return ReadLineResult {
+    reader: next_r,
+    line: String { len: line_len, data: line_buf },
+    eof: false
+  }
+}
+
+export fn BufReader.close(): void {
+  close(this.fd)
+  free(this.buf, this.cap)
+}

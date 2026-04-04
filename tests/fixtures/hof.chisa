@@ -1,0 +1,7 @@
+fn apply(f: (number) -> number, x: number): number = f(x)
+
+fn makeAdder(n: number): (number) -> number = { x -> x + n }
+
+let addFive = makeAdder(5)
+let result = addFive(3)
+print(result)

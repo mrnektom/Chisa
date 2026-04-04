@@ -1,0 +1,8 @@
+fn number.double(): number = this * 2
+
+fn number.clamp(lo: number, hi: number): number =
+    if (this < lo) lo else if (this > hi) hi else this
+
+let n = 5
+let d = n.double()
+print(d)

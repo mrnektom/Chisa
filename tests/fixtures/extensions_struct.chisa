@@ -1,0 +1,10 @@
+struct Point { x: number, y: number }
+
+fn Point.sum(): number = this.x + this.y
+
+fn Point.scale(factor: number): Point =
+    Point { x: this.x * factor, y: this.y * factor }
+
+let p = Point { x: 3, y: 4 }
+let s = p.sum()
+print(s)

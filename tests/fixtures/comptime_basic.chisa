@@ -1,0 +1,10 @@
+struct Point { x: number, y: number }
+
+comptime {
+    runtime {
+        fn Point.zero(): Point = Point { x: 0, y: 0 }
+    }
+}
+
+let p = Point.zero()
+print(p.x)

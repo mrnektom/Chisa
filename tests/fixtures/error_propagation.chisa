@@ -1,0 +1,11 @@
+import { Either } from "../../stdlib/Either.zs"
+
+fn divide(a: number, b: number): Either<number, number> {
+    if (b == 0) return Either.Left(1)
+    return Either.Right(a / b)
+}
+
+fn compute(a: number, b: number): Either<number, number> {
+    let result = divide(a, b)!!
+    return Either.Right(result * 2)
+}

@@ -1,0 +1,8 @@
+fn platform(): number = when {
+    os == "linux" -> 1,
+    os == "windows" -> 2,
+    else -> 0
+}
+
+let n = platform()
+print(n)

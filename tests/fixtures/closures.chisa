@@ -1,0 +1,6 @@
+let count = 0
+let inc = { -> count = count + 1 }
+
+inc()
+inc()
+print(count)

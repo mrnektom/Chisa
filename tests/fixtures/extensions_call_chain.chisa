@@ -1,0 +1,6 @@
+fn number.double(): number = this * 2
+fn number.addOne(): number = this + 1
+
+let n = 5
+let r = n.double().addOne()
+print(r)

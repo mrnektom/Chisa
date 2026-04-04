@@ -1,0 +1,7 @@
+let n = 1
+let result = match n {
+    0 -> 100,
+    1 -> 200,
+    else -> 300
+}
+print(result)

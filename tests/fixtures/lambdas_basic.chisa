@@ -1,0 +1,4 @@
+let double = { x -> x + x }
+let addOne = { x -> x + 1 }
+let negate = { x -> 0 - x }
+let noArg = { -> 42 }

@@ -1,0 +1,2 @@
+type Action = () -> void
+type Transform = (number) -> number

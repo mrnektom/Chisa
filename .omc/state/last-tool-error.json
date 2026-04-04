@@ -1,7 +1,0 @@
-{
-  "tool_name": "Bash",
-  "tool_input_preview": "{\"command\":\"opt --verify /tmp/files.bc -o /dev/null 2>&1 && echo \\\"opt OK\\\" && zig build run -- -i examples/files.zs -r 2>&1\",\"description\":\"Verify with opt and run files.zs\"}",
-  "error": "Exit code 1\nThe `opt -passname` syntax for the new pass manager is not supported, please use `opt -passes=<pipeline>` (or the `-p` alias for a more concise version).\nSee https://llvm.org/docs/NewPassManager.html#invoking-opt for more details on the pass pipeline syntax.",
-  "timestamp": "2026-04-02T01:05:46.252Z",
-  "retry_count": 1
-}

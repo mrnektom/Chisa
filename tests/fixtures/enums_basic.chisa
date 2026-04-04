@@ -1,0 +1,9 @@
+enum Color { Red, Green, Blue }
+
+let c = Color.Red
+let n = match c {
+    Color.Red -> 0,
+    Color.Green -> 1,
+    Color.Blue -> 2
+}
+print(n)
