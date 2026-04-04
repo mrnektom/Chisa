@@ -1,5 +1,5 @@
-import { Either } from "./Either.zs"
-import { free } from "./mem.zs"
+import { Either } from "./Either.chisa"
+import { free } from "./mem.chisa"
 
 export const O_RDONLY = 0
 export const O_WRONLY = 1

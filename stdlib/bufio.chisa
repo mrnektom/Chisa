@@ -1,7 +1,7 @@
-import { String, charAt } from "./String.zs"
-import { alloc, free } from "./mem.zs"
-import { Either } from "./Either.zs"
-import { open, close, writeFd, readFd, FsError, O_RDONLY, O_WRITE_NEW, MODE_DEFAULT } from "./fs.zs"
+import { String, charAt } from "./String.chisa"
+import { alloc, free } from "./mem.chisa"
+import { Either } from "./Either.chisa"
+import { open, close, writeFd, readFd, FsError, O_RDONLY, O_WRITE_NEW, MODE_DEFAULT } from "./fs.chisa"
 
 export struct BufWriter {
   fd: number

@@ -299,7 +299,7 @@ class ChisaParser : PsiParser {
                     b.error("Expected '->' in function type")
                 }
             }
-            b.tokenType == ChisaTokenTypes.IDENTIFIER || b.tokenType == ChisaTokenTypes.CHAR_KW -> {
+            b.tokenType == ChisaTokenTypes.IDENTIFIER -> {
                 b.advanceLexer()
                 // Optional generic args <T, U>
                 if (b.tokenType == ChisaTokenTypes.LT) {
@@ -587,18 +587,18 @@ class ChisaParser : PsiParser {
      *   4: +, -
      *   5: *, /, %
      */
-    private fun parseExpression(b: PsiBuilder) {
-        parseExpressionPrec(b, 0)
+    private fun parseExpression(b: PsiBuilder, allowStructLit: Boolean = true) {
+        parseExpressionPrec(b, 0, allowStructLit)
     }
 
-    private fun parseExpressionPrec(b: PsiBuilder, minPrec: Int) {
-        parseUnaryExpression(b)
+    private fun parseExpressionPrec(b: PsiBuilder, minPrec: Int, allowStructLit: Boolean = true) {
+        parseUnaryExpression(b, allowStructLit)
 
         while (!b.eof()) {
             val prec = operatorPrecedence(b.tokenType) ?: break
             if (prec < minPrec) break
             b.advanceLexer() // eat operator
-            parseExpressionPrec(b, prec + 1)
+            parseExpressionPrec(b, prec + 1, allowStructLit)
         }
     }
 
@@ -614,22 +614,22 @@ class ChisaParser : PsiParser {
         else -> null
     }
 
-    private fun parseUnaryExpression(b: PsiBuilder) {
+    private fun parseUnaryExpression(b: PsiBuilder, allowStructLit: Boolean = true) {
         // Unary prefix: !, -
         if (b.tokenType == ChisaTokenTypes.BANG || b.tokenType == ChisaTokenTypes.MINUS) {
             b.advanceLexer()
         }
-        parsePrimaryExpression(b)
+        parsePrimaryExpression(b, allowStructLit)
     }
 
-    private fun parsePrimaryExpression(b: PsiBuilder) {
+    private fun parsePrimaryExpression(b: PsiBuilder, allowStructLit: Boolean = true) {
         when (b.tokenType) {
             ChisaTokenTypes.IDENTIFIER,
             ChisaTokenTypes.THIS_KW -> {
                 val marker = b.mark()
                 b.advanceLexer() // eat identifier / this
                 marker.done(ChisaElementTypes.REFERENCE_EXPRESSION)
-                parseSuffix(b)
+                parseSuffix(b, allowStructLit)
             }
             ChisaTokenTypes.NUMBER_LITERAL,
             ChisaTokenTypes.STRING_LITERAL,
@@ -663,7 +663,7 @@ class ChisaParser : PsiParser {
         }
     }
 
-    private fun parseSuffix(b: PsiBuilder) {
+    private fun parseSuffix(b: PsiBuilder, allowStructLit: Boolean = true) {
         while (!b.eof()) {
             when (b.tokenType) {
                 ChisaTokenTypes.LPAREN -> {
@@ -683,7 +683,7 @@ class ChisaParser : PsiParser {
                 }
                 ChisaTokenTypes.LBRACE -> {
                     // Struct literal: Name { field: value, ... }
-                    parseStructLiteralBody(b)
+                    if (allowStructLit) parseStructLiteralBody(b) else break
                 }
                 ChisaTokenTypes.LT -> {
                     // Generic struct literal: Name<T, U> { field: value, ... }
@@ -746,7 +746,7 @@ class ChisaParser : PsiParser {
     private fun parseMatchExpression(b: PsiBuilder) {
         val marker = b.mark()
         b.advanceLexer() // eat match
-        parseExpression(b) // subject
+        parseExpression(b, allowStructLit = false) // subject: { starts the arm body, not a struct literal
         if (b.tokenType == ChisaTokenTypes.LBRACE) {
             b.advanceLexer() // eat {
             while (!b.eof() && b.tokenType != ChisaTokenTypes.RBRACE) {
@@ -1033,7 +1033,7 @@ class ChisaParser : PsiParser {
                 if (b.tokenType == ChisaTokenTypes.COLON) {
                     b.advanceLexer() // eat :
                     // skip type tokens: ident, optional <...>, optional []
-                    if (b.tokenType == ChisaTokenTypes.IDENTIFIER || b.tokenType == ChisaTokenTypes.CHAR_KW) {
+                    if (b.tokenType == ChisaTokenTypes.IDENTIFIER) {
                         b.advanceLexer()
                         if (b.tokenType == ChisaTokenTypes.LT) skipGenericParams(b)
                         if (b.tokenType == ChisaTokenTypes.LBRACKET) {

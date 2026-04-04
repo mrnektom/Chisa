@@ -1,4 +1,4 @@
-import { alloc } from "./mem.zs"
+import { alloc } from "./mem.chisa"
 export struct String {
     len: number,
     data: Pointer<char>

@@ -1039,6 +1039,8 @@ fn analyzeFunction(self: *Self, function: ast.stmt.ZSFn) !Symbol {
                     fields[i] = .{ .name = f.name, .type = ft };
                 }
                 break :blk Symbol.ZSType{ .struct_type = .{ .name = sd.name, .fields = fields, .type_args = &.{} } };
+            } else if (self.enumDefs.get(function.receiver_type.?)) |ed| blk: {
+                break :blk try self.buildEnumType(ed);
             } else Symbol.ZSType.unknown;
             try self.tableStack.put(.{
                 .name = "this",

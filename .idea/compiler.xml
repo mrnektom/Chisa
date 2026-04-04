@@ -2,9 +2,9 @@
 <project version="4">
   <component name="CompilerConfiguration">
     <bytecodeTargetLevel>
-      <module name="zenscript-intellij" target="17" />
-      <module name="zenscript-intellij.main" target="17" />
-      <module name="zenscript-intellij.test" target="17" />
+      <module name="chisa-intellij" target="17" />
+      <module name="chisa-intellij.main" target="17" />
+      <module name="chisa-intellij.test" target="17" />
     </bytecodeTargetLevel>
   </component>
 </project>

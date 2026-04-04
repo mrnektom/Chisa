@@ -11,7 +11,7 @@ object ChisaTokenSets {
         ChisaTokenTypes.ENUM, ChisaTokenTypes.EXTERNAL, ChisaTokenTypes.IMPORT,
         ChisaTokenTypes.EXPORT, ChisaTokenTypes.FROM, ChisaTokenTypes.AS,
         ChisaTokenTypes.USE, ChisaTokenTypes.TRUE, ChisaTokenTypes.FALSE,
-        ChisaTokenTypes.CHAR_KW, ChisaTokenTypes.SCALAR,
+        ChisaTokenTypes.SCALAR,
         ChisaTokenTypes.WHEN, ChisaTokenTypes.ASM, ChisaTokenTypes.TYPE_KW,
         ChisaTokenTypes.IN_KW, ChisaTokenTypes.OUT_KW, ChisaTokenTypes.CLOBBER_KW,
         ChisaTokenTypes.THIS_KW
@@ -56,7 +56,6 @@ object ChisaTokenTypes {
     @JvmField val USE = ChisaTokenType("USE")
     @JvmField val TRUE = ChisaTokenType("TRUE")
     @JvmField val FALSE = ChisaTokenType("FALSE")
-    @JvmField val CHAR_KW = ChisaTokenType("CHAR_KW")
     @JvmField val SCALAR = ChisaTokenType("SCALAR")
     @JvmField val WHEN = ChisaTokenType("WHEN")
     @JvmField val ASM = ChisaTokenType("ASM")
@@ -118,7 +117,7 @@ object ChisaTokenTypes {
         "enum" to ENUM, "external" to EXTERNAL, "import" to IMPORT,
         "export" to EXPORT, "from" to FROM, "as" to AS,
         "use" to USE, "true" to TRUE, "false" to FALSE,
-        "char" to CHAR_KW, "scalar" to SCALAR,
+        "scalar" to SCALAR,
         "when" to WHEN, "asm" to ASM, "type" to TYPE_KW,
         "in" to IN_KW, "out" to OUT_KW, "clobber" to CLOBBER_KW,
         "this" to THIS_KW

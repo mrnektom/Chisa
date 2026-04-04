@@ -1,9 +1,9 @@
-import { Option } from "./Option.zs"
-import { Either } from "./Either.zs"
-import { List, newList } from "./arraylist.zs"
-import { free, alloc } from "./mem.zs"
-import { strConcat, String } from "./String.zs"
-export { print } from "./fs.zs"
+import { Option } from "./Option.chisa"
+import { Either } from "./Either.chisa"
+import { List, newList } from "./arraylist.chisa"
+import { free, alloc } from "./mem.chisa"
+import { strConcat, String } from "./String.chisa"
+export { print } from "./fs.chisa"
 
 scalar number
 scalar long

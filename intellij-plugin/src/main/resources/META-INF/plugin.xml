@@ -1,11 +1,11 @@
 <idea-plugin>
-    <id>org.zenscript.intellij</id>
-    <name>ZenScript</name>
+    <id>org.chisa.intellij</id>
+    <name>Chisa</name>
     <version>0.1.0</version>
-    <vendor>ZenScript</vendor>
+    <vendor>Chisa</vendor>
 
     <description><![CDATA[
-    Language support for ZenScript (.zs files).
+    Language support for Chisa (.chisa files).
     Provides syntax highlighting, file type recognition, and basic structure view.
     ]]></description>
 
@@ -13,57 +13,57 @@
 
     <extensions defaultExtensionNs="com.intellij">
         <fileType
-                name="ZenScript"
-                implementationClass="org.zenscript.intellij.ZenScriptFileType"
+                name="Chisa"
+                implementationClass="org.chisa.intellij.ChisaFileType"
                 fieldName="INSTANCE"
-                language="ZenScript"
-                extensions="zs"/>
+                language="Chisa"
+                extensions="chisa"/>
 
         <lang.parserDefinition
-                language="ZenScript"
-                implementationClass="org.zenscript.intellij.parser.ZenScriptParserDefinition"/>
+                language="Chisa"
+                implementationClass="org.chisa.intellij.parser.ChisaParserDefinition"/>
 
         <lang.syntaxHighlighterFactory
-                language="ZenScript"
-                implementationClass="org.zenscript.intellij.highlighting.ZenScriptSyntaxHighlighterFactory"/>
+                language="Chisa"
+                implementationClass="org.chisa.intellij.highlighting.ChisaSyntaxHighlighterFactory"/>
 
         <lang.psiStructureViewFactory
-                language="ZenScript"
-                implementationClass="org.zenscript.intellij.structure.ZenScriptStructureViewFactory"/>
+                language="Chisa"
+                implementationClass="org.chisa.intellij.structure.ChisaStructureViewFactory"/>
 
         <lang.documentationProvider
-                language="ZenScript"
-                implementationClass="org.zenscript.intellij.documentation.ZenScriptDocumentationProvider"/>
+                language="Chisa"
+                implementationClass="org.chisa.intellij.documentation.ChisaDocumentationProvider"/>
 
         <completion.contributor
-                language="ZenScript"
-                implementationClass="org.zenscript.intellij.completion.ZenScriptCompletionContributor"/>
+                language="Chisa"
+                implementationClass="org.chisa.intellij.completion.ChisaCompletionContributor"/>
 
         <annotator
-                language="ZenScript"
-                implementationClass="org.zenscript.intellij.highlighting.ZenScriptAnnotator"/>
+                language="Chisa"
+                implementationClass="org.chisa.intellij.highlighting.ChisaAnnotator"/>
 
         <colorSettingsPage
-                implementation="org.zenscript.intellij.highlighting.ZenScriptColorSettingsPage"/>
+                implementation="org.chisa.intellij.highlighting.ChisaColorSettingsPage"/>
 
         <projectService
-                serviceImplementation="org.zenscript.intellij.settings.ZenScriptSettings"/>
+                serviceImplementation="org.chisa.intellij.settings.ChisaSettings"/>
 
         <projectService
-                serviceImplementation="org.zenscript.intellij.settings.ZenScriptPreludeService"/>
+                serviceImplementation="org.chisa.intellij.settings.ChisaPreludeService"/>
 
         <projectService
-                serviceImplementation="org.zenscript.intellij.daemon.DaemonService"/>
+                serviceImplementation="org.chisa.intellij.daemon.DaemonService"/>
 
         <externalAnnotator
-                language="ZenScript"
-                implementationClass="org.zenscript.intellij.daemon.DaemonAnnotator"/>
+                language="Chisa"
+                implementationClass="org.chisa.intellij.daemon.DaemonAnnotator"/>
 
         <projectConfigurable
                 parentId="language"
-                instance="org.zenscript.intellij.settings.ZenScriptSettingsConfigurable"
-                id="org.zenscript.intellij.settings"
-                displayName="ZenScript"/>
+                instance="org.chisa.intellij.settings.ChisaSettingsConfigurable"
+                id="org.chisa.intellij.settings"
+                displayName="Chisa"/>
 
     </extensions>
 </idea-plugin>
