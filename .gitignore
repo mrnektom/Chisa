@@ -10,3 +10,4 @@ dist/
 intellij-plugin/.gradle
 intellij-plugin/.intellijPlatform
 **/.omc
+.claude
