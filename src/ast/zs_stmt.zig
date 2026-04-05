@@ -43,7 +43,7 @@ pub const ZSAsmBlock = struct {
 pub const ZSTypeAlias = struct {
     name: []const u8,
     type_params: []const []const u8,
-    aliased_type: @import("zs_type_notation.zig").ZSType,
+    aliased_type: @import("zs_type_notation.zig").ZSTypeNotation,
     modifiers: Modifiers,
     startPos: usize,
 };

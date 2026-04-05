@@ -13,7 +13,12 @@ pub fn main() !void {
         return;
     };
 
-    var pipline = Pipline.create();
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    const allocator = gpa.allocator();
+    defer _ = gpa.deinit();
+
+    var pipline = try Pipline.init(allocator);
+    defer pipline.deinit();
     try pipline.compile(args);
 }
 

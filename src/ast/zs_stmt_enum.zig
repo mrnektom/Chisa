@@ -11,7 +11,7 @@ endPos: usize,
 
 pub const ZSEnumVariant = struct {
     name: []const u8,
-    payload_type: ?type_notation.ZSType,
+    payload_type: ?type_notation.ZSTypeNotation,
 };
 
 pub fn deinit(self: *const @This(), allocator: std.mem.Allocator) void {

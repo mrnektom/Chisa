@@ -28,6 +28,25 @@ matchEnumNames: ?*const std.AutoHashMap(usize, []const u8),
 extensionCalls: ?*const std.AutoHashMap(usize, void),
 lambdaNames: ?*const std.AutoHashMap(usize, []const u8),
 
+pub const IrGenContext = struct {
+    module: *const zsm.ZSModule,
+    allocator: std.mem.Allocator,
+    resolutions: *const std.AutoHashMap(usize, []const u8),
+    overloadedNames: *const std.StringHashMap(void),
+    fieldIndices: *const std.AutoHashMap(usize, u32),
+    enumInits: *const std.AutoHashMap(usize, Analyzer.EnumInitInfo),
+    derefTypes: *const std.AutoHashMap(usize, []const u8),
+    indexElemTypes: *const std.AutoHashMap(usize, []const u8),
+    arrayLiteralElemTypes: *const std.AutoHashMap(usize, []const u8),
+    monomorphizedFunctions: []const ast.stmt.ZSFn,
+    structInitResolutions: *const std.AutoHashMap(usize, []const u8),
+    importedVarNames: ?*const std.StringHashMap([]const u8) = null,
+    monomorphizedEnums: ?*const std.StringHashMap(Analyzer.MonomorphizedEnumDef) = null,
+    matchEnumNames: ?*const std.AutoHashMap(usize, []const u8) = null,
+    extensionCalls: ?*const std.AutoHashMap(usize, void) = null,
+    lambdaNames: ?*const std.AutoHashMap(usize, []const u8) = null,
+};
+
 pub const IrGenResult = struct {
     instructions: ir.ZSIRInstructions,
     varNames: std.StringHashMap([]const u8),
@@ -38,46 +57,14 @@ pub const IrGenResult = struct {
     }
 };
 
-pub fn generateIr(
-    module: *const zsm.ZSModule,
-    allocator: std.mem.Allocator,
-    resolutions: *const std.AutoHashMap(usize, []const u8),
-    overloadedNames: *const std.StringHashMap(void),
-    fieldIndices: *const std.AutoHashMap(usize, u32),
-    enumInits: *const std.AutoHashMap(usize, Analyzer.EnumInitInfo),
-    derefTypes: *const std.AutoHashMap(usize, []const u8),
-    indexElemTypes: *const std.AutoHashMap(usize, []const u8),
-    arrayLiteralElemTypes: *const std.AutoHashMap(usize, []const u8),
-    monomorphizedFunctions: []const ast.stmt.ZSFn,
-    structInitResolutions: *const std.AutoHashMap(usize, []const u8),
-) !IrGenResult {
-    return generateIrWithImports(module, allocator, resolutions, overloadedNames, fieldIndices, enumInits, derefTypes, indexElemTypes, arrayLiteralElemTypes, monomorphizedFunctions, structInitResolutions, null, null, null, null, null);
-}
-
-pub fn generateIrWithImports(
-    module: *const zsm.ZSModule,
-    allocator: std.mem.Allocator,
-    resolutions: *const std.AutoHashMap(usize, []const u8),
-    overloadedNames: *const std.StringHashMap(void),
-    fieldIndices: *const std.AutoHashMap(usize, u32),
-    enumInits: *const std.AutoHashMap(usize, Analyzer.EnumInitInfo),
-    derefTypes: *const std.AutoHashMap(usize, []const u8),
-    indexElemTypes: *const std.AutoHashMap(usize, []const u8),
-    arrayLiteralElemTypes: *const std.AutoHashMap(usize, []const u8),
-    monomorphizedFunctions: []const ast.stmt.ZSFn,
-    structInitResolutions: *const std.AutoHashMap(usize, []const u8),
-    importedVarNames: ?*const std.StringHashMap([]const u8),
-    monomorphizedEnums: ?*const std.StringHashMap(Analyzer.MonomorphizedEnumDef),
-    matchEnumNames: ?*const std.AutoHashMap(usize, []const u8),
-    extensionCalls: ?*const std.AutoHashMap(usize, void),
-    lambdaNames: ?*const std.AutoHashMap(usize, []const u8),
-) !IrGenResult {
+pub fn generate(ctx: IrGenContext) !IrGenResult {
+    const allocator = ctx.allocator;
     var instructions = try std.ArrayList(ir.ZSIR).initCapacity(allocator, 5);
     defer instructions.deinit(allocator);
 
     var varNames = std.StringHashMap([]const u8).init(allocator);
     // Pre-populate with imported variable mappings
-    if (importedVarNames) |imports| {
+    if (ctx.importedVarNames) |imports| {
         var it = imports.iterator();
         while (it.next()) |entry| {
             try varNames.put(entry.key_ptr.*, entry.value_ptr.*);
@@ -89,19 +76,19 @@ pub fn generateIrWithImports(
         .topLevelInstructions = &instructions,
         .allocator = allocator,
         .varNames = varNames,
-        .resolutions = resolutions,
-        .overloadedNames = overloadedNames,
-        .fieldIndices = fieldIndices,
-        .enumInits = enumInits,
-        .derefTypes = derefTypes,
-        .indexElemTypes = indexElemTypes,
-        .arrayLiteralElemTypes = arrayLiteralElemTypes,
-        .monomorphizedFunctions = monomorphizedFunctions,
-        .structInitResolutions = structInitResolutions,
-        .monomorphizedEnums = monomorphizedEnums,
-        .matchEnumNames = matchEnumNames,
-        .extensionCalls = extensionCalls,
-        .lambdaNames = lambdaNames,
+        .resolutions = ctx.resolutions,
+        .overloadedNames = ctx.overloadedNames,
+        .fieldIndices = ctx.fieldIndices,
+        .enumInits = ctx.enumInits,
+        .derefTypes = ctx.derefTypes,
+        .indexElemTypes = ctx.indexElemTypes,
+        .arrayLiteralElemTypes = ctx.arrayLiteralElemTypes,
+        .monomorphizedFunctions = ctx.monomorphizedFunctions,
+        .structInitResolutions = ctx.structInitResolutions,
+        .monomorphizedEnums = ctx.monomorphizedEnums,
+        .matchEnumNames = ctx.matchEnumNames,
+        .extensionCalls = ctx.extensionCalls,
+        .lambdaNames = ctx.lambdaNames,
     };
 
     // Generate IR for monomorphized generic enums before other nodes
@@ -125,7 +112,7 @@ pub fn generateIrWithImports(
         }
     }
 
-    for (module.ast) |node| {
+    for (ctx.module.ast) |node| {
         _ = try irGen.generateNode(node);
     }
 
@@ -144,7 +131,7 @@ const computeMangledName = @import("ZenScript").MangleHelpers.computeMangledName
 
 /// Returns an owned (allocated) IR type name string for the given AST type annotation.
 /// Generic types like `Either<FsError, String>` produce mangled names like `Either__FsError_String`.
-fn typeAnnotationToIrTypeName(allocator: std.mem.Allocator, t: ast.ZSType) ![]const u8 {
+fn typeAnnotationToIrTypeName(allocator: std.mem.Allocator, t: ast.ZSTypeNotation) ![]const u8 {
     return switch (t) {
         .reference => |ref| try allocator.dupe(u8, ref),
         .generic => |g| blk: {

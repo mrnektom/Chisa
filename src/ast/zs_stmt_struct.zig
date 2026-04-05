@@ -11,7 +11,7 @@ endPos: usize,
 
 pub const ZSStructField = struct {
     name: []const u8,
-    type: type_notation.ZSType,
+    type: type_notation.ZSTypeNotation,
 };
 
 pub fn deinit(self: *const @This(), allocator: std.mem.Allocator) void {

@@ -58,10 +58,10 @@ fn handleCheck(allocator: std.mem.Allocator, req: protocol.Request, ctx: Context
     for (result.errors) |err| {
         try diags.append(allocator, .{
             .message = err.message,
-            .line = err.lineNumber,
-            .col = err.lineCol,
-            .start = err.start,
-            .end = err.end,
+            .line = err.lineNumber orelse 0,
+            .col = err.lineCol orelse 0,
+            .start = err.start orelse 0,
+            .end = err.end orelse 0,
         });
     }
 

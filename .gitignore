@@ -9,3 +9,4 @@ node_modules/
 dist/
 intellij-plugin/.gradle
 intellij-plugin/.intellijPlatform
+**/.omc

@@ -1464,7 +1464,7 @@ fn nextVar(self: *Self, modifiers: ast.stmt.Modifiers) Error!?ast.stmt.ZSVar {
     const name = try self.nextIdent();
 
     // Parse optional type annotation: `: Type`
-    var type_annotation: ?ast.ZSType = null;
+    var type_annotation: ?ast.ZSTypeNotation = null;
     if (self.checkToken(":")) {
         self.shiftToken();
         type_annotation = try self.nextTypeInner();
@@ -1731,7 +1731,7 @@ fn nextEnum(self: *Self, modifiers: ast.stmt.Modifiers) Error!?ast.stmt.ZSEnum {
     while (true) {
         if (self.checkToken("}")) break;
         const variantName = try self.nextIdent();
-        var payload_type: ?ast.ZSType = null;
+        var payload_type: ?ast.ZSTypeNotation = null;
         if (self.checkToken("(")) {
             self.shiftToken();
             payload_type = try self.nextTypeInner();
@@ -1950,17 +1950,17 @@ fn nextMatchExpr(self: *Self) Error!?ast.expr.ZSMatchExpr {
     };
 }
 
-fn nextType(self: *Self) !?ast.ZSType {
+fn nextType(self: *Self) !?ast.ZSTypeNotation {
     if (!self.checkToken(":")) return null;
     self.shiftToken();
 
     return try self.nextTypeInner();
 }
 
-fn nextFnType(self: *Self) Error!ast.ZSType {
+fn nextFnType(self: *Self) Error!ast.ZSTypeNotation {
     // current token is '(' — already checked by caller
     self.shiftToken(); // consume '('
-    var paramTypes = try std.ArrayList(ast.type_notation.ZSType).initCapacity(self.allocator, 2);
+    var paramTypes = try std.ArrayList(ast.type_notation.ZSTypeNotation).initCapacity(self.allocator, 2);
     defer paramTypes.deinit(self.allocator);
 
     if (!self.checkToken(")")) {
@@ -1978,23 +1978,23 @@ fn nextFnType(self: *Self) Error!ast.ZSType {
     try self.expectToken("->");
     const retType = try self.nextTypeInner();
 
-    const retPtr = try self.allocator.create(ast.type_notation.ZSType);
+    const retPtr = try self.allocator.create(ast.type_notation.ZSTypeNotation);
     retPtr.* = retType;
-    return ast.ZSType{ .fn_type = .{
-        .param_types = try self.allocator.dupe(ast.type_notation.ZSType, paramTypes.items),
+    return ast.ZSTypeNotation{ .fn_type = .{
+        .param_types = try self.allocator.dupe(ast.type_notation.ZSTypeNotation, paramTypes.items),
         .return_type = retPtr,
     } };
 }
 
-fn nextTypeInner(self: *Self) Error!ast.ZSType {
+fn nextTypeInner(self: *Self) Error!ast.ZSTypeNotation {
     if (self.checkToken("(")) return try self.nextFnType();
     const typeName = try self.nextIdent();
 
     // Check for generic type args: Name<T, U>
-    var baseType: ast.ZSType = blk: {
+    var baseType: ast.ZSTypeNotation = blk: {
         if (self.checkToken("<")) {
             self.shiftToken();
-            var type_args = try std.ArrayList(ast.type_notation.ZSType).initCapacity(self.allocator, 2);
+            var type_args = try std.ArrayList(ast.type_notation.ZSTypeNotation).initCapacity(self.allocator, 2);
             defer type_args.deinit(self.allocator);
 
             while (true) {
@@ -2008,21 +2008,21 @@ fn nextTypeInner(self: *Self) Error!ast.ZSType {
             }
             try self.expectToken(">");
 
-            break :blk ast.ZSType{ .generic = .{
+            break :blk ast.ZSTypeNotation{ .generic = .{
                 .name = typeName,
-                .type_args = try self.allocator.dupe(ast.type_notation.ZSType, type_args.items),
+                .type_args = try self.allocator.dupe(ast.type_notation.ZSTypeNotation, type_args.items),
             } };
         }
-        break :blk ast.ZSType{ .reference = typeName };
+        break :blk ast.ZSTypeNotation{ .reference = typeName };
     };
 
     // Check for postfix array syntax: T[], T[][]
     while (self.checkToken("[")) {
         self.shiftToken(); // consume '['
         try self.expectToken("]");
-        const elemPtr = try self.allocator.create(ast.type_notation.ZSType);
+        const elemPtr = try self.allocator.create(ast.type_notation.ZSTypeNotation);
         elemPtr.* = baseType;
-        baseType = ast.ZSType{ .array = .{ .element_type = elemPtr } };
+        baseType = ast.ZSTypeNotation{ .array = .{ .element_type = elemPtr } };
     }
 
     return baseType;
@@ -2510,13 +2510,13 @@ test "parse generic type annotation" {
     const f = module.ast[0].stmt.function;
     // Arg type: Pointer<number>
     const argType = f.args[0].type.?;
-    try std.testing.expectEqual(ast.type_notation.ZSTypeType.generic, @as(ast.type_notation.ZSTypeType, argType));
+    try std.testing.expectEqual(ast.type_notation.ZSTypeNotationType.generic, @as(ast.type_notation.ZSTypeNotationType, argType));
     try std.testing.expectEqualStrings("Pointer", argType.generic.name);
     try std.testing.expectEqual(@as(usize, 1), argType.generic.type_args.len);
     try std.testing.expectEqualStrings("number", argType.generic.type_args[0].typeName());
     // Ret type: Pair<number, String>
     const retType = f.ret.?;
-    try std.testing.expectEqual(ast.type_notation.ZSTypeType.generic, @as(ast.type_notation.ZSTypeType, retType));
+    try std.testing.expectEqual(ast.type_notation.ZSTypeNotationType.generic, @as(ast.type_notation.ZSTypeNotationType, retType));
     try std.testing.expectEqualStrings("Pair", retType.generic.name);
     try std.testing.expectEqual(@as(usize, 2), retType.generic.type_args.len);
     try std.testing.expectEqualStrings("number", retType.generic.type_args[0].typeName());

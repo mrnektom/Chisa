@@ -7,4 +7,4 @@ pub const Sig = @import("analyzer/symbol_signature.zig");
 pub const ZSModule = @import("ast/zs_module.zig").ZSModule;
 pub const SymbolTable = @import("analyzer/symbol_table_stack.zig").SymbolTable;
 pub const ZSFn = @import("ast/zs_stmt_fn.zig");
-pub const ZSAstType = @import("ast/zs_type_notation.zig").ZSType;
+pub const ZSAstType = @import("ast/zs_type_notation.zig").ZSTypeNotation;

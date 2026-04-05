@@ -15,7 +15,7 @@ const type_notation = @import("ast/zs_type_notation.zig");
 const Preprocessor = @import("preprocessor.zig");
 
 /// Convert an AST type notation to the string name used by codegen's mapType.
-fn resolveFieldTypeName(t: type_notation.ZSType) []const u8 {
+fn resolveFieldTypeName(t: type_notation.ZSTypeNotation) []const u8 {
     return switch (t) {
         .reference => |ref| {
             if (std.mem.eql(u8, ref, "number") or std.mem.eql(u8, ref, "int")) return "number";
@@ -88,8 +88,35 @@ const CompiledModule = struct {
     irResult: IRGen.IrGenResult,
 };
 
-pub fn create() Self {
-    return Self{};
+allocator: std.mem.Allocator,
+cache: std.StringHashMap(CompiledModule),
+inProgress: std.StringHashMap(void),
+allSources: std.ArrayList([]const u8),
+allModules: std.ArrayList(zsm.ZSModule),
+
+pub fn init(allocator: std.mem.Allocator) !Self {
+    return .{
+        .allocator = allocator,
+        .cache = std.StringHashMap(CompiledModule).init(allocator),
+        .inProgress = std.StringHashMap(void).init(allocator),
+        .allSources = try std.ArrayList([]const u8).initCapacity(allocator, 4),
+        .allModules = try std.ArrayList(zsm.ZSModule).initCapacity(allocator, 4),
+    };
+}
+
+pub fn deinit(self: *Self) void {
+    var cacheIter = self.cache.iterator();
+    while (cacheIter.next()) |entry| {
+        entry.value_ptr.analyzeResult.deinit(self.allocator);
+        entry.value_ptr.irResult.deinit(self.allocator);
+        self.allocator.free(entry.key_ptr.*);
+    }
+    self.cache.deinit();
+    self.inProgress.deinit();
+    for (self.allSources.items) |s| self.allocator.free(s);
+    self.allSources.deinit(self.allocator);
+    for (self.allModules.items) |m| m.deinit(self.allocator);
+    self.allModules.deinit(self.allocator);
 }
 
 /// Resolve a relative import path against the importing file's directory.
@@ -107,23 +134,18 @@ fn resolvePath(allocator: std.mem.Allocator, importerPath: []const u8, relativeP
 
 /// Recursively compile a module and all its dependencies.
 /// Returns the CompiledModule for the given path.
-fn compileModule(
-    allocator: std.mem.Allocator,
-    path: []const u8,
-    cache: *std.StringHashMap(CompiledModule),
-    inProgress: *std.StringHashMap(void),
-    allSources: *std.ArrayList([]const u8),
-    allModules: *std.ArrayList(zsm.ZSModule),
-) !CompiledModule {
+fn compileModule(self: *Self, path: []const u8) !CompiledModule {
+    const allocator = self.allocator;
+
     // Check cache
-    if (cache.get(path)) |result| return result;
+    if (self.cache.get(path)) |result| return result;
 
     // Cycle detection
-    if (inProgress.contains(path)) {
+    if (self.inProgress.contains(path)) {
         std.debug.print("Error: Circular import detected for '{s}'\n", .{path});
         return error.CircularImport;
     }
-    try inProgress.put(path, {});
+    try self.inProgress.put(path, {});
 
     // Read file
     const file = std.fs.cwd().openFile(path, .{ .mode = .read_only }) catch |err| {
@@ -135,7 +157,7 @@ fn compileModule(
     defer file.close();
     const fileSize: usize = @intCast((try file.stat()).size);
     const buffer = try file.readToEndAlloc(allocator, fileSize);
-    try allSources.append(allocator, buffer);
+    try self.allSources.append(allocator, buffer);
 
     // Tokenize & parse
     const tokenizer = Tokenizer.create(buffer);
@@ -149,7 +171,7 @@ fn compileModule(
     var ppCtx = Preprocessor.CompileTimeContext.init(allocator);
     defer ppCtx.deinit();
     const module = try Preprocessor.preprocessModule(allocator, rawModule, &ppCtx);
-    try allModules.append(allocator, module);
+    try self.allModules.append(allocator, module);
 
     // Recursively compile dependencies
     var depAnalyzeResults = std.StringHashMap(Analyzer.AnalyzeResult).init(allocator);
@@ -165,7 +187,7 @@ fn compileModule(
 
         const depPath = try allocator.dupe(u8, resolvedPath);
         defer allocator.free(depPath);
-        const depCompiled = try compileModule(allocator, depPath, cache, inProgress, allSources, allModules);
+        const depCompiled = try self.compileModule(depPath);
         try depAnalyzeResults.put(dep.path, depCompiled.analyzeResult);
 
         // Map imported symbol names (using alias if present) to their IR names from the dep
@@ -181,24 +203,24 @@ fn compileModule(
     const analyzeResult = try Analyzer.analyze(module, allocator, &depAnalyzeResults);
 
     // Generate IR
-    const irResult = try IRGen.generateIrWithImports(
-        &module,
-        allocator,
-        &analyzeResult.resolutions,
-        &analyzeResult.overloadedNames,
-        &analyzeResult.fieldIndices,
-        &analyzeResult.enumInits,
-        &analyzeResult.derefTypes,
-        &analyzeResult.indexElemTypes,
-        &analyzeResult.arrayLiteralElemTypes,
-        analyzeResult.monomorphizedFunctions.items,
-        &analyzeResult.structInitResolutions,
-        &importedVarNames,
-        &analyzeResult.monomorphizedEnums,
-        &analyzeResult.matchEnumNames,
-        &analyzeResult.extensionCalls,
-        &analyzeResult.lambdaNames,
-    );
+    const irResult = try IRGen.generate(.{
+        .module = &module,
+        .allocator = allocator,
+        .resolutions = &analyzeResult.resolutions,
+        .overloadedNames = &analyzeResult.overloadedNames,
+        .fieldIndices = &analyzeResult.fieldIndices,
+        .enumInits = &analyzeResult.enumInits,
+        .derefTypes = &analyzeResult.derefTypes,
+        .indexElemTypes = &analyzeResult.indexElemTypes,
+        .arrayLiteralElemTypes = &analyzeResult.arrayLiteralElemTypes,
+        .monomorphizedFunctions = analyzeResult.monomorphizedFunctions.items,
+        .structInitResolutions = &analyzeResult.structInitResolutions,
+        .importedVarNames = &importedVarNames,
+        .monomorphizedEnums = &analyzeResult.monomorphizedEnums,
+        .matchEnumNames = &analyzeResult.matchEnumNames,
+        .extensionCalls = &analyzeResult.extensionCalls,
+        .lambdaNames = &analyzeResult.lambdaNames,
+    });
 
     const compiled = CompiledModule{
         .analyzeResult = analyzeResult,
@@ -208,10 +230,10 @@ fn compileModule(
     // Cache result and unmark in-progress
     const cacheKey = try allocator.dupe(u8, path);
     errdefer allocator.free(cacheKey);
-    try cache.put(cacheKey, compiled);
-    _ = inProgress.remove(path);
+    try self.cache.put(cacheKey, compiled);
+    _ = self.inProgress.remove(path);
 
-    return cache.get(path).?;
+    return self.cache.get(path).?;
 }
 
 /// Merge dependency IR instructions before entry module IR.
@@ -275,10 +297,7 @@ fn findPreludePath(allocator: std.mem.Allocator) !?[]const u8 {
 }
 
 pub fn compile(self: *Self, args: Args.ExecutionArgs) !void {
-    _ = self;
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    const allocator = gpa.allocator();
-    defer _ = gpa.deinit();
+    const allocator = self.allocator;
 
     const file = std.fs.cwd().openFile(args.entryPoint, .{ .mode = .read_only }) catch |err| {
         if (err == error.FileNotFound) {
@@ -313,30 +332,6 @@ pub fn compile(self: *Self, args: Args.ExecutionArgs) !void {
     const module = try Preprocessor.preprocessModule(allocator, rawModule, &ppCtx);
     defer module.deinit(allocator);
 
-    // Compile dependencies recursively
-    var cache = std.StringHashMap(CompiledModule).init(allocator);
-    defer {
-        var cacheIter = cache.iterator();
-        while (cacheIter.next()) |entry| {
-            entry.value_ptr.analyzeResult.deinit(allocator);
-            entry.value_ptr.irResult.deinit(allocator);
-            allocator.free(entry.key_ptr.*);
-        }
-        cache.deinit();
-    }
-    var inProgress = std.StringHashMap(void).init(allocator);
-    defer inProgress.deinit();
-    var allSources = try std.ArrayList([]const u8).initCapacity(allocator, 4);
-    defer {
-        for (allSources.items) |s| allocator.free(s);
-        allSources.deinit(allocator);
-    }
-    var allModules = try std.ArrayList(zsm.ZSModule).initCapacity(allocator, 4);
-    defer {
-        for (allModules.items) |m| m.deinit(allocator);
-        allModules.deinit(allocator);
-    }
-
     var depAnalyzeResults = std.StringHashMap(Analyzer.AnalyzeResult).init(allocator);
     defer depAnalyzeResults.deinit();
 
@@ -354,7 +349,7 @@ pub fn compile(self: *Self, args: Args.ExecutionArgs) !void {
 
         const depPath = try allocator.dupe(u8, resolvedPath);
         defer allocator.free(depPath);
-        const depResult = compileModule(allocator, depPath, &cache, &inProgress, &allSources, &allModules) catch |err| switch (err) {
+        const depResult = self.compileModule(depPath) catch |err| switch (err) {
             error.FileNotFound => return,
             else => return err,
         };
@@ -379,11 +374,11 @@ pub fn compile(self: *Self, args: Args.ExecutionArgs) !void {
     var preludeScalarDefs: ?*const std.StringHashMap(@import("analyzer/symbol_signature.zig").ZSType) = null;
     if (try findPreludePath(allocator)) |pPath| {
         defer allocator.free(pPath);
-        if (compileModule(allocator, pPath, &cache, &inProgress, &allSources, &allModules)) |preludeCompiled| {
+        if (self.compileModule(pPath)) |preludeCompiled| {
             // Add prelude first so its functions (alloc, free, etc.) are available
             try depCompiled.append(allocator, preludeCompiled);
             // Add prelude's transitive deps (like arraylist.zs) after
-            var cacheIter2 = cache.iterator();
+            var cacheIter2 = self.cache.iterator();
             while (cacheIter2.next()) |cEntry| {
                 // Check if already in depCompiled (avoid duplicates)
                 var found = false;
@@ -398,7 +393,7 @@ pub fn compile(self: *Self, args: Args.ExecutionArgs) !void {
                 }
             }
             // Get a stable pointer from the cache (not the local copy which goes out of scope)
-            const cachedPrelude = cache.getPtr(pPath) orelse return error.PreludeCacheInconsistency;
+            const cachedPrelude = self.cache.getPtr(pPath) orelse return error.PreludeCacheInconsistency;
             preludeExports = &cachedPrelude.analyzeResult.exports;
             preludeOverloads = &cachedPrelude.analyzeResult.overloads;
             preludeStructDefs = &cachedPrelude.analyzeResult.exportedStructDefs;
@@ -428,24 +423,24 @@ pub fn compile(self: *Self, args: Args.ExecutionArgs) !void {
     }
     if (analyzeResult.errors.len == 0) {
         std.debug.print("Generating ir\n", .{});
-        var entryIrResult = try IRGen.generateIrWithImports(
-            &module,
-            allocator,
-            &analyzeResult.resolutions,
-            &analyzeResult.overloadedNames,
-            &analyzeResult.fieldIndices,
-            &analyzeResult.enumInits,
-            &analyzeResult.derefTypes,
-            &analyzeResult.indexElemTypes,
-            &analyzeResult.arrayLiteralElemTypes,
-            analyzeResult.monomorphizedFunctions.items,
-            &analyzeResult.structInitResolutions,
-            &importedVarNames,
-            &analyzeResult.monomorphizedEnums,
-            &analyzeResult.matchEnumNames,
-            &analyzeResult.extensionCalls,
-            &analyzeResult.lambdaNames,
-        );
+        var entryIrResult = try IRGen.generate(.{
+            .module = &module,
+            .allocator = allocator,
+            .resolutions = &analyzeResult.resolutions,
+            .overloadedNames = &analyzeResult.overloadedNames,
+            .fieldIndices = &analyzeResult.fieldIndices,
+            .enumInits = &analyzeResult.enumInits,
+            .derefTypes = &analyzeResult.derefTypes,
+            .indexElemTypes = &analyzeResult.indexElemTypes,
+            .arrayLiteralElemTypes = &analyzeResult.arrayLiteralElemTypes,
+            .monomorphizedFunctions = analyzeResult.monomorphizedFunctions.items,
+            .structInitResolutions = &analyzeResult.structInitResolutions,
+            .importedVarNames = &importedVarNames,
+            .monomorphizedEnums = &analyzeResult.monomorphizedEnums,
+            .matchEnumNames = &analyzeResult.matchEnumNames,
+            .extensionCalls = &analyzeResult.extensionCalls,
+            .lambdaNames = &analyzeResult.lambdaNames,
+        });
         defer entryIrResult.deinit(allocator);
 
         // Merge dependency IR with entry module IR

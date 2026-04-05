@@ -1,8 +1,8 @@
 const std = @import("std");
 
-pub const ZSTypeType = enum { reference, generic, array, fn_type };
+pub const ZSTypeNotationType = enum { reference, generic, array, fn_type };
 
-pub const ZSType = union(ZSTypeType) {
+pub const ZSTypeNotation = union(ZSTypeNotationType) {
     reference: []const u8,
     generic: ZSGenericType,
     array: ZSArrayType,
@@ -30,7 +30,7 @@ pub const ZSType = union(ZSTypeType) {
 
 pub const ZSGenericType = struct {
     name: []const u8,
-    type_args: []ZSType,
+    type_args: []ZSTypeNotation,
 
     pub fn deinit(self: *const @This(), allocator: std.mem.Allocator) void {
         for (self.type_args) |*arg| {
@@ -41,8 +41,8 @@ pub const ZSGenericType = struct {
 };
 
 pub const ZSFnType = struct {
-    param_types: []ZSType,
-    return_type: *ZSType,
+    param_types: []ZSTypeNotation,
+    return_type: *ZSTypeNotation,
 
     pub fn deinit(self: *const @This(), allocator: std.mem.Allocator) void {
         for (self.param_types) |*pt| {
@@ -55,7 +55,7 @@ pub const ZSFnType = struct {
 };
 
 pub const ZSArrayType = struct {
-    element_type: *ZSType,
+    element_type: *ZSTypeNotation,
 
     pub fn deinit(self: *const @This(), allocator: std.mem.Allocator) void {
         self.element_type.deinit(allocator);

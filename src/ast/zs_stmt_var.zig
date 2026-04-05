@@ -7,7 +7,7 @@ type: VariableType,
 name: []const u8,
 expr: Expr,
 modifiers: stmt.Modifiers,
-type_annotation: ?type_notation.ZSType = null,
+type_annotation: ?type_notation.ZSTypeNotation = null,
 
 pub const VariableType = enum {
     Const,

@@ -8,7 +8,7 @@ pub const zs_use = @import("zs_use.zig");
 
 pub const VarType = stmt.VarType;
 
-pub const ZSType = type_notation.ZSType;
+pub const ZSTypeNotation = type_notation.ZSTypeNotation;
 pub const ZSBuiltin = type_notation.BuiltinType;
 pub const ZSImport = zs_import;
 pub const ZSExportFrom = zs_export_from;
