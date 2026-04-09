@@ -1,0 +1,11 @@
+import { Option } from "../../stdlib/Option.chisa"
+import { Either } from "../../stdlib/Either.chisa"
+
+// Nested Option — infer Option<number> as T
+let nested = Option.Some(Option.Some(42))
+
+// Either with Option payload — infer Option<number> as Left type
+fn wrap(x: number): Either<Option<number>, number> {
+    let opt = Option.Some(x)
+    return Either.Left(opt)
+}

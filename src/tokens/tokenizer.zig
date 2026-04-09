@@ -32,8 +32,36 @@ pub fn hasNext(self: *Tokenizer) bool {
 
 fn skipWhitespace(self: *Tokenizer) void {
     while (self.peek()) |c| {
-        if (!std.ascii.isWhitespace(c)) break;
-        self.shift();
+        if (std.ascii.isWhitespace(c)) {
+            self.shift();
+            continue;
+        }
+        if (c == '/' and self.position + 1 < self.input.len) {
+            const next_char = self.input[self.position + 1];
+            if (next_char == '/') {
+                self.shift();
+                self.shift();
+                while (self.peek()) |comment_char| {
+                    if (comment_char == '\n') break;
+                    self.shift();
+                }
+                continue;
+            }
+            if (next_char == '*') {
+                self.shift();
+                self.shift();
+                while (self.peek()) |comment_char| {
+                    if (comment_char == '*' and self.position + 1 < self.input.len and self.input[self.position + 1] == '/') {
+                        self.shift();
+                        self.shift();
+                        break;
+                    }
+                    self.shift();
+                }
+                continue;
+            }
+        }
+        break;
     }
 }
 

@@ -4,14 +4,14 @@ const Pipeline = @import("pipeline.zig");
 const Args = @import("args/args.zig");
 
 fn compileFile(path: []const u8) !void {
-    var p = Pipeline.create();
+    var p = try Pipeline.init(testing.allocator);
+    defer p.deinit();
     try p.compile(.{
         .entryPoint = path,
         .dumpIr = false,
         .outputPath = null,
         .run = false,
         .debug = false,
-        .verbose = false,
     });
 }
 
@@ -74,6 +74,10 @@ test "enums: generic" {
     try compileFile("tests/fixtures/enums_generic.chisa");
 }
 
+test "enums: nested generic payload inference" {
+    try compileFile("tests/fixtures/enums_generic_nested.chisa");
+}
+
 test "extensions: scalar receiver" {
     try compileFile("tests/fixtures/extensions_scalars.chisa");
 }
@@ -83,7 +87,7 @@ test "extensions: struct receiver" {
 }
 
 test "extensions: generic receiver" {
-    return error.SkipZigTest; // generic extension match on 'this' not yet implemented
+    try compileFile("tests/fixtures/extensions_generic.chisa");
 }
 
 test "match: number literal arms" {
@@ -116,10 +120,6 @@ test "control flow: for loop" {
 
 test "control flow: break and continue" {
     try compileFile("tests/fixtures/break_continue.chisa");
-}
-
-test "control flow: block expression" {
-    try compileFile("tests/fixtures/block_expr.chisa");
 }
 
 test "control flow: return statement" {
@@ -196,8 +196,16 @@ test "lambdas: invoke stored lambda" {
     try compileFile("tests/fixtures/lambdas_invoke.chisa");
 }
 
+test "lambdas: implicit single parameter uses it" {
+    try compileFile("tests/fixtures/lambdas_implicit_it.chisa");
+}
+
+test "lambdas: implicit zero-arg body omits arrow" {
+    try compileFile("tests/fixtures/lambdas_implicit_empty.chisa");
+}
+
 test "closures: capture and mutate outer variable" {
-    return error.SkipZigTest; // closure capture not yet implemented
+    try compileFile("tests/fixtures/closures_basic.chisa");
 }
 
 test "higher-order functions: pass lambda as argument" {
@@ -205,11 +213,35 @@ test "higher-order functions: pass lambda as argument" {
 }
 
 test "trailing lambda: call with trailing lambda syntax" {
-    return error.SkipZigTest; // trailing lambda syntax not yet parsed
+    try compileFile("tests/fixtures/trailing_lambda.chisa");
+}
+
+test "inference: generic function call with lambda" {
+    try compileFile("tests/fixtures/infer_generic_lambda_call.chisa");
+}
+
+test "inference: generic extension chain with lambda" {
+    try compileFile("tests/fixtures/infer_extension_chain.chisa");
+}
+
+test "inference: direct generic extension chain preserves downstream context" {
+    try compileFile("tests/fixtures/infer_extension_chain_direct.chisa");
+}
+
+test "inference: generic lambda return follows expected result type" {
+    try compileFile("tests/fixtures/infer_generic_expected_lambda_return.chisa");
+}
+
+test "inference: nested generic extension result preserves inner type args" {
+    try compileFile("tests/fixtures/infer_nested_generic_extension.chisa");
+}
+
+test "inference: expected type drives generic enum construction" {
+    try compileFile("tests/fixtures/infer_expected_generic_enum.chisa");
 }
 
 test "safe navigation: optional chaining with ?." {
-    return error.SkipZigTest; // analyzer cannot type-check desugared ?. lambda field access
+    try compileFile("tests/fixtures/safe_navigation.chisa");
 }
 
 test "error propagation: !! operator on Either" {
@@ -240,4 +272,12 @@ test "errors: type mismatch" {
 
 test "errors: reassign const" {
     try expectCompileError("tests/fixtures/errors/reassign_const.chisa");
+}
+
+test "errors: unknown expression type" {
+    try expectCompileError("tests/fixtures/errors/unknown_expr_type.chisa");
+}
+
+test "errors: block expression syntax is reserved for lambdas" {
+    try expectCompileError("tests/fixtures/errors/block_expr_removed.chisa");
 }

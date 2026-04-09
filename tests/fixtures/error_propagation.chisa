@@ -1,4 +1,4 @@
-import { Either } from "../../stdlib/Either.zs"
+import { Either } from "../../stdlib/Either.chisa"
 
 fn divide(a: number, b: number): Either<number, number> {
     if (b == 0) return Either.Left(1)

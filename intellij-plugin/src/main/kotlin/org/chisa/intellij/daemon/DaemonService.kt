@@ -1,6 +1,7 @@
 package org.chisa.intellij.daemon
 
 import com.intellij.openapi.Disposable
+import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.project.Project
@@ -31,6 +32,11 @@ class DaemonService(private val project: Project) : Disposable {
     fun getClient(): DaemonClient? {
         val existing = client
         if (existing != null && isDaemonAlive()) return existing
+        // Don't block the EDT — start daemon on a pooled thread and return null for now
+        if (ApplicationManager.getApplication().isDispatchThread) {
+            ApplicationManager.getApplication().executeOnPooledThread { startDaemon() }
+            return null
+        }
         return startDaemon()
     }
 
@@ -86,7 +92,7 @@ class DaemonService(private val project: Project) : Disposable {
             }, "zs-daemon-output").apply { isDaemon = true; start() }
 
             // Give the daemon a moment to bind the socket
-            Thread.sleep(200)
+            proc.waitFor(200, java.util.concurrent.TimeUnit.MILLISECONDS)
 
             if (!proc.isAlive) {
                 log.warn("zs-daemon: process exited immediately (exit=${proc.exitValue()})")

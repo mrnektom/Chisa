@@ -392,20 +392,20 @@ object ChisaResolveUtil {
     fun collectProjectExportedSymbols(from: PsiFile, alreadySeen: Set<String>): List<ProjectSymbol> {
         val project = from.project
         val currentVFile = from.virtualFile ?: run {
-            LOG.warn("Chisa project completion: from.virtualFile is null")
+            LOG.debug("Chisa project completion: from.virtualFile is null")
             return emptyList()
         }
         val result = mutableListOf<ProjectSymbol>()
         val psiManager = PsiManager.getInstance(project)
 
         val roots = ProjectRootManager.getInstance(project).contentRoots
-        LOG.warn("Chisa project completion: contentRoots count = ${roots.size}, currentFile = ${currentVFile.path}")
+        LOG.debug("Chisa project completion: contentRoots count = ${roots.size}, currentFile = ${currentVFile.path}")
 
         for (root in roots) {
-            LOG.warn("Chisa project completion: scanning root = ${root.path}")
+            LOG.debug("Chisa project completion: scanning root = ${root.path}")
             VfsUtilCore.iterateChildrenRecursively(root, null) { vFile ->
                 if (!vFile.isDirectory && vFile.extension == "zs" && vFile != currentVFile) {
-                    LOG.warn("Chisa project completion: found .chisa file = ${vFile.path}")
+                    LOG.debug("Chisa project completion: found .chisa file = ${vFile.path}")
                     val relativePath = computeRelativePath(currentVFile, vFile)
                     if (relativePath != null) {
                         val psiFile = psiManager.findFile(vFile)
@@ -419,16 +419,16 @@ object ChisaResolveUtil {
                                 }
                             }
                         } else {
-                            LOG.warn("Chisa project completion: psiManager.findFile returned null for ${vFile.path}")
+                            LOG.debug("Chisa project completion: psiManager.findFile returned null for ${vFile.path}")
                         }
                     } else {
-                        LOG.warn("Chisa project completion: computeRelativePath returned null for ${vFile.path}")
+                        LOG.debug("Chisa project completion: computeRelativePath returned null for ${vFile.path}")
                     }
                 }
                 true
             }
         }
-        LOG.warn("Chisa project completion: total symbols collected = ${result.size}")
+        LOG.debug("Chisa project completion: total symbols collected = ${result.size}")
         return result
     }
 

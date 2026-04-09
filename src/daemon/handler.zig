@@ -417,6 +417,7 @@ fn typeToString(t: Sig.ZSType) []const u8 {
         .long => "long",
         .short => "short",
         .byte => "byte",
+        .void => "void",
         .unknown => "unknown",
         .function => "function",
         .struct_type => |st| st.name,

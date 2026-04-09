@@ -13,7 +13,7 @@ export fn alloc(size: long): Pointer<char> {
   return addr
 }
 
-export fn free(addr: long, size: long): void {
+export fn free<T>(addr: Pointer<T>, size: long): void {
   asm {
     in rax = 11
     in rdi = addr
@@ -21,3 +21,8 @@ export fn free(addr: long, size: long): void {
     "syscall"
   }
 }
+
+external fn ptr<T>(value: T): Pointer<T>
+external fn deref<T>(ptr: Pointer<T>): T
+
+type Pointer<T> = long

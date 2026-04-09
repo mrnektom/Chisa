@@ -1,4 +1,4 @@
-import { Option } from "../stdlib/Option.zs"
+import { Option } from "../stdlib/Option.chisa"
 
 let x = Option.Some(42)
 let y: Option<number> = Option.None

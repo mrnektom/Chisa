@@ -1,5 +1,5 @@
 const std = @import("std");
-const ZSIRType = enum { assign, store, call, fn_decl, fn_def, ret, branch, compare, arith, loop, module_init, struct_init, field_access, ptr_op, deref_op, alloc_op, free_op, array_init, index_access, index_store, field_store, enum_init, match_expr, enum_decl, break_stmt, continue_stmt, not_op, asm_block };
+const ZSIRType = enum { assign, store, call, fn_decl, fn_def, ret, branch, compare, arith, loop, module_init, struct_init, field_access, ptr_op, deref_op, store_ptr, alloc_op, free_op, array_init, index_access, index_store, field_store, enum_init, match_expr, enum_decl, break_stmt, continue_stmt, not_op, asm_block };
 
 pub const ZSIRInstructions = struct {
     instructions: []ZSIR,
@@ -25,6 +25,7 @@ pub const ZSIR = union(ZSIRType) {
     field_access: ZSIRFieldAccess,
     ptr_op: ZSIRPtrOp,
     deref_op: ZSIRDerefOp,
+    store_ptr: ZSIRStorePtr,
     alloc_op: ZSIRAllocOp,
     free_op: ZSIRFreeOp,
     array_init: ZSIRArrayInit,
@@ -56,6 +57,7 @@ pub const ZSIR = union(ZSIRType) {
             .field_access => self.field_access.deinit(allocator),
             .ptr_op => self.ptr_op.deinit(allocator),
             .deref_op => self.deref_op.deinit(allocator),
+            .store_ptr => self.store_ptr.deinit(allocator),
             .alloc_op => self.alloc_op.deinit(allocator),
             .free_op => self.free_op.deinit(allocator),
             .array_init => self.array_init.deinit(allocator),
@@ -78,7 +80,7 @@ pub const ZSIR = union(ZSIRType) {
         switch (self) {
             .assign => try writer.print("{f}", .{self.assign}),
             .call => try writer.print("{f}", .{self.call}),
-            .store, .fn_decl, .fn_def, .ret, .branch, .compare, .arith, .loop, .module_init, .struct_init, .field_access, .ptr_op, .deref_op, .alloc_op, .free_op, .array_init, .index_access, .index_store, .field_store, .enum_init, .match_expr, .enum_decl, .break_stmt, .continue_stmt, .not_op, .asm_block => {},
+            .store, .fn_decl, .fn_def, .ret, .branch, .compare, .arith, .loop, .module_init, .struct_init, .field_access, .ptr_op, .deref_op, .store_ptr, .alloc_op, .free_op, .array_init, .index_access, .index_store, .field_store, .enum_init, .match_expr, .enum_decl, .break_stmt, .continue_stmt, .not_op, .asm_block => {},
         }
     }
 };
@@ -180,6 +182,7 @@ pub const ZSIRFnDef = struct {
         allocator.free(self.retType);
         for (self.argTypes) |t| allocator.free(t);
         allocator.free(self.argTypes);
+        for (self.argNames) |n| allocator.free(n);
         allocator.free(self.argNames);
     }
 };
@@ -299,6 +302,16 @@ pub const ZSIRDerefOp = struct {
     pub fn deinit(self: *const @This(), allocator: std.mem.Allocator) void {
         allocator.free(self.resultName);
     }
+};
+
+/// Store a value through a pointer (for capture-by-reference writes).
+/// `pointer` holds an i64-encoded address; `value` is the IR name of the new value.
+pub const ZSIRStorePtr = struct {
+    pointer: []const u8,
+    value: []const u8,
+    pointeeType: []const u8,
+
+    pub fn deinit(_: *const @This(), _: std.mem.Allocator) void {}
 };
 
 pub const ZSIRArrayInit = struct {
@@ -421,6 +434,7 @@ pub const ZSIRFreeOp = struct {
 pub const ZSIRFieldStore = struct {
     subject: []const u8,
     field_name: []const u8,
+    fieldIndex: u32,
     value: []const u8,
 
     pub fn deinit(_: *const @This(), _: std.mem.Allocator) void {}

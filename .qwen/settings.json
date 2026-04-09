@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(zig *)",
+      "Bash(ls *)"
+    ]
+  },
+  "$version": 3
+}

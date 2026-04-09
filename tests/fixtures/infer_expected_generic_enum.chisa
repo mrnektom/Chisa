@@ -1,0 +1,13 @@
+import { Option } from "../../stdlib/Option.chisa"
+
+fn fallback(flag: boolean): Option<number> = if flag {
+    Option.Some(10)
+} else {
+    Option.None
+}
+
+let noneValue: Option<number> = Option.None
+let fromFn = fallback(false)
+let value = fromFn.getOrElse(0)
+
+print(value)

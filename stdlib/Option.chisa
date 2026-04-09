@@ -1,5 +1,22 @@
+import { Either } from "./Either.chisa"
+import { Unit } from "./Unit.chisa"
+
 export enum Option<T> {
   Some(T),
   None,
 }
 
+export fn Option<T>.getOrElse(default: T): T = match this {
+  Option.Some(v) -> v,
+  Option.None    -> default
+}
+
+export fn Option<T>.map<U>(f: (T) -> U): Option<U> = match this {
+  Option.Some(v) -> Option.Some(f(v)),
+  Option.None    -> Option.None
+}
+
+export fn Option<T>.toEither(): Either<Unit, T> = match this {
+  Option.Some(v) -> Either.Right(v),
+  Option.None    -> Either.Left(Unit{})
+}

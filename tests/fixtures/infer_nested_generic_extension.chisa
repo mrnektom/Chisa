@@ -1,0 +1,10 @@
+import { Option } from "../../stdlib/Option.chisa"
+
+let nested = Option.Some(42).map { x -> Option.Some(x + 1) }
+let missing: Option<Option<number>> = Option.Some(42).map { x -> Option.None }
+
+let nestedValue = nested.getOrElse(Option.Some(0)).getOrElse(0)
+let missingValue = missing.getOrElse(Option.Some(7)).getOrElse(0)
+
+print(nestedValue)
+print(missingValue)

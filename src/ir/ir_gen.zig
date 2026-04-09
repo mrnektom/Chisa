@@ -9,6 +9,19 @@ const Self = @This();
 
 pub const Error = error{} || std.mem.Allocator.Error || std.fmt.ParseIntError;
 
+/// Represents a single captured variable in a lambda closure.
+/// srcName/outerIrName are borrowed (valid for generate() lifetime).
+/// paramName is allocPrint-owned and freed in lambdaCaptureMap cleanup.
+const CaptureEntry = struct {
+    srcName: []const u8, // source identifier (e.g. "acc")
+    outerIrName: []const u8, // IR temp in outer scope (e.g. "x3")
+    paramName: []const u8, // hidden leading param in lambda fn (e.g. "__cap_0")
+};
+
+fn callResolutionKey(startPos: usize, endPos: usize) usize {
+    return std.hash.Wyhash.hash(0, std.mem.asBytes(&[_]usize{ startPos, endPos }));
+}
+
 instructions: *std.ArrayList(ir.ZSIR),
 topLevelInstructions: *std.ArrayList(ir.ZSIR),
 allocator: std.mem.Allocator,
@@ -27,6 +40,16 @@ monomorphizedEnums: ?*const std.StringHashMap(Analyzer.MonomorphizedEnumDef),
 matchEnumNames: ?*const std.AutoHashMap(usize, []const u8),
 extensionCalls: ?*const std.AutoHashMap(usize, void),
 lambdaNames: ?*const std.AutoHashMap(usize, []const u8),
+lambdaTypes: ?*const std.AutoHashMap(usize, sig.ZSType),
+safeNavInfo: ?*const std.AutoHashMap(usize, Analyzer.SafeNavInfo),
+// Closure capture state — set only while inside generateLambda body gen
+outerVarNamesForCapture: ?*const std.StringHashMap([]const u8) = null,
+currentLambdaCaptures: ?*std.ArrayList(CaptureEntry) = null,
+// Set of variable names that are captured-by-reference inside the current lambda
+// (these hold pointers, so reads need deref_op and writes need store_ptr)
+capturedVarNamesSet: ?*std.StringHashMap(void) = null,
+// Maps lambda fn name → owned slice of CaptureEntry (for call-site prepending)
+lambdaCaptureMap: std.StringHashMap([]CaptureEntry),
 
 pub const IrGenContext = struct {
     module: *const zsm.ZSModule,
@@ -45,6 +68,8 @@ pub const IrGenContext = struct {
     matchEnumNames: ?*const std.AutoHashMap(usize, []const u8) = null,
     extensionCalls: ?*const std.AutoHashMap(usize, void) = null,
     lambdaNames: ?*const std.AutoHashMap(usize, []const u8) = null,
+    lambdaTypes: ?*const std.AutoHashMap(usize, sig.ZSType) = null,
+    safeNavInfo: ?*const std.AutoHashMap(usize, Analyzer.SafeNavInfo) = null,
 };
 
 pub const IrGenResult = struct {
@@ -89,7 +114,19 @@ pub fn generate(ctx: IrGenContext) !IrGenResult {
         .matchEnumNames = ctx.matchEnumNames,
         .extensionCalls = ctx.extensionCalls,
         .lambdaNames = ctx.lambdaNames,
+        .lambdaTypes = ctx.lambdaTypes,
+        .safeNavInfo = ctx.safeNavInfo,
+        .lambdaCaptureMap = std.StringHashMap([]CaptureEntry).init(allocator),
     };
+    // Cleanup lambdaCaptureMap on both success and error paths
+    defer {
+        var mapIter = irGen.lambdaCaptureMap.iterator();
+        while (mapIter.next()) |entry| {
+            // paramName strings are owned by fn_def.argNames; freed by fn_def.deinit
+            allocator.free(entry.value_ptr.*);
+        }
+        irGen.lambdaCaptureMap.deinit();
+    }
 
     // Generate IR for monomorphized generic enums before other nodes
     // so enum_decl instructions are visible to match/init lookups
@@ -154,7 +191,7 @@ fn generateNode(self: *Self, node: ast.ZSAstNode) ![]const u8 {
         .expr => self.generateExpr(node.expr),
         .import_decl => |imp| try self.generateImport(imp),
         .export_from => |ef| try self.generateExportFrom(ef),
-        .use_decl => "",  // use declarations don't generate IR
+        .use_decl => "", // use declarations don't generate IR
         .when_decl, .target_decl => "", // consumed by preprocessor
     };
 }
@@ -181,10 +218,10 @@ fn generateStmt(self: *Self, stmt: ast.stmt.ZSStmt) ![]const u8 {
         .variable => try self.generateVariable(stmt.variable),
         .function => try self.generateFunction(stmt.function),
         .reassign => try self.generateReassign(stmt.reassign),
-        .struct_decl => "",  // Struct declarations don't generate IR instructions
+        .struct_decl => "", // Struct declarations don't generate IR instructions
         .enum_decl => try self.generateEnumDecl(stmt.enum_decl),
-        .scalar_decl => "",  // Scalar declarations don't generate IR instructions
-        .type_alias => "",  // Type aliases don't generate IR
+        .scalar_decl => "", // Scalar declarations don't generate IR instructions
+        .type_alias => "", // Type aliases don't generate IR
         .asm_block => try self.generateAsmBlock(stmt.asm_block),
     };
 }
@@ -196,7 +233,7 @@ fn generateExpr(self: *Self, expr: ast.expr.ZSExpr) Error![]const u8 {
         .char => self.generateCharAssign(expr.char),
         .boolean => self.generateBooleanAssign(expr.boolean),
         .call => self.generateCallOrIntrinsic(expr.call),
-        .reference => self.generateReference(expr.reference),
+        .reference => try self.generateReference(expr.reference),
         .if_expr => self.generateIfExpr(expr.if_expr),
         .while_expr => self.generateWhileExpr(expr.while_expr),
         .for_expr => self.generateForExpr(expr.for_expr),
@@ -213,6 +250,7 @@ fn generateExpr(self: *Self, expr: ast.expr.ZSExpr) Error![]const u8 {
         .enum_init => self.generateEnumInit(expr.enum_init),
         .match_expr => self.generateMatchExpr(expr.match_expr),
         .lambda => self.generateLambda(expr.lambda),
+        .safe_nav => self.generateSafeNav(expr.safe_nav),
     };
 }
 
@@ -247,7 +285,7 @@ fn generateCallOrIntrinsic(self: *Self, call: ast.expr.ZSCall) Error![]const u8 
 
 fn generateCall(self: *Self, call: ast.expr.ZSCall) Error![]const u8 {
     // Check if this is an extension function call
-    const isExtCall = if (self.extensionCalls) |ec| ec.contains(call.startPos) else false;
+    const isExtCall = if (self.extensionCalls) |ec| ec.contains(callResolutionKey(call.startPos, call.endPos)) else false;
 
     var callerName: []const u8 = undefined;
     var argNames: [][]const u8 = undefined;
@@ -270,9 +308,43 @@ fn generateCall(self: *Self, call: ast.expr.ZSCall) Error![]const u8 {
         }
     }
 
-    // Check if this call has a resolved overload name
-    if (self.resolutions.get(call.startPos)) |resolvedName| {
-        callerName = resolvedName;
+    // Only apply a resolved name when it still matches the callee we are lowering.
+    // Chained calls can reuse startPos, so blindly trusting the map can assign the
+    // outer call's resolved name to an inner call in the same chain.
+    if (self.resolutions.get(callResolutionKey(call.startPos, call.endPos))) |resolvedName| {
+        const expectedCallee = switch (call.subject.*) {
+            .reference => |ref| ref.name,
+            .field_access => |fa| fa.field,
+            else => null,
+        };
+        if (expectedCallee) |name| {
+            if (resolvedNameMatchesCallee(resolvedName, name)) {
+                callerName = resolvedName;
+            }
+        } else {
+            callerName = resolvedName;
+        }
+    }
+
+    // If callerName is a capturing lambda, prepend pointers to the captured outer
+    // variables as hidden leading arguments (capture-by-reference).
+    if (self.lambdaCaptureMap.get(callerName)) |captures| {
+        if (captures.len > 0) {
+            const newArgs = try self.allocator.alloc([]const u8, captures.len + argNames.len);
+            for (captures, 0..) |cap, i| {
+                // Emit ptr_op to get address of the captured variable's alloca
+                const outerIr = self.varNames.get(cap.srcName) orelse cap.outerIrName;
+                const ptrName = try self.generateName();
+                try self.instructions.append(self.allocator, ir.ZSIR{ .ptr_op = .{
+                    .resultName = ptrName,
+                    .operand = outerIr,
+                } });
+                newArgs[i] = ptrName;
+            }
+            @memcpy(newArgs[captures.len..], argNames);
+            self.allocator.free(argNames);
+            argNames = newArgs;
+        }
     }
 
     const resultName = try self.generateName();
@@ -290,8 +362,78 @@ fn generateCall(self: *Self, call: ast.expr.ZSCall) Error![]const u8 {
     return resultName;
 }
 
-fn generateReference(self: *Self, reference: ast.expr.ZSReference) []const u8 {
-    return self.varNames.get(reference.name) orelse reference.name;
+fn resolvedNameMatchesCallee(resolvedName: []const u8, expectedCallee: []const u8) bool {
+    if (std.mem.eql(u8, resolvedName, expectedCallee)) return true;
+
+    var base = resolvedName;
+
+    if (std.mem.lastIndexOfScalar(u8, base, '.')) |dot| {
+        base = base[dot + 1 ..];
+    }
+    if (std.mem.indexOf(u8, base, "__")) |idx| {
+        base = base[0..idx];
+    }
+    if (std.mem.indexOfScalar(u8, base, '$')) |idx| {
+        base = base[0..idx];
+    }
+
+    return std.mem.eql(u8, base, expectedCallee);
+}
+
+fn generateReference(self: *Self, reference: ast.expr.ZSReference) Error![]const u8 {
+    if (self.varNames.get(reference.name)) |irName| {
+        // If this var is a captured-by-reference pointer, emit deref_op to load through it
+        if (self.capturedVarNamesSet) |capSet| {
+            if (capSet.get(reference.name) != null) {
+                const derefName = try self.generateName();
+                try self.instructions.append(self.allocator, ir.ZSIR{ .deref_op = .{
+                    .resultName = derefName,
+                    .operand = irName,
+                    .pointeeType = "number",
+                } });
+                return derefName;
+            }
+        }
+        return irName;
+    }
+    // Check outer scope for closure capture
+    if (self.outerVarNamesForCapture) |outerVars| {
+        if (outerVars.get(reference.name)) |outerIrName| {
+            if (self.currentLambdaCaptures) |caps| {
+                // Return existing capture param if already recorded
+                for (caps.items) |cap| {
+                    if (std.mem.eql(u8, cap.srcName, reference.name)) {
+                        // Emit deref_op to load current value through the pointer
+                        const derefName = try self.generateName();
+                        try self.instructions.append(self.allocator, ir.ZSIR{ .deref_op = .{
+                            .resultName = derefName,
+                            .operand = cap.paramName,
+                            .pointeeType = "number",
+                        } });
+                        return derefName;
+                    }
+                }
+                // Record new capture and allocate a hidden param name
+                const paramName = try std.fmt.allocPrint(self.allocator, "__cap_{d}", .{caps.items.len});
+                try caps.append(self.allocator, .{ .srcName = reference.name, .outerIrName = outerIrName, .paramName = paramName });
+                // Mark this var as captured-by-reference in the lambda scope
+                if (self.capturedVarNamesSet) |capSet| {
+                    try capSet.put(reference.name, {});
+                }
+                // Also add the pointer param to innerVarNames so future lookups hit the fast path
+                try self.varNames.put(reference.name, paramName);
+                // Emit deref_op to load current value through the pointer
+                const derefName = try self.generateName();
+                try self.instructions.append(self.allocator, ir.ZSIR{ .deref_op = .{
+                    .resultName = derefName,
+                    .operand = paramName,
+                    .pointeeType = "number",
+                } });
+                return derefName;
+            }
+        }
+    }
+    return reference.name;
 }
 
 fn generateVariable(self: *Self, variable: ast.stmt.ZSVar) ![]const u8 {
@@ -304,6 +446,23 @@ fn generateReassign(self: *Self, reassign: ast.stmt.ZSReassign) ![]const u8 {
     const irName = try self.generateExpr(reassign.expr);
     switch (reassign.target) {
         .name => |name| {
+            // If the target is a captured-by-reference var, store through the pointer
+            if (self.capturedVarNamesSet) |capSet| {
+                if (capSet.get(name) != null) {
+                    const ptrName = self.varNames.get(name) orelse name;
+                    try self.instructions.append(
+                        self.allocator,
+                        ir.ZSIR{
+                            .store_ptr = ir.ZSIRStorePtr{
+                                .pointer = ptrName,
+                                .value = irName,
+                                .pointeeType = "number",
+                            },
+                        },
+                    );
+                    return irName;
+                }
+            }
             const existingName = self.varNames.get(name) orelse name;
             try self.instructions.append(
                 self.allocator,
@@ -339,6 +498,7 @@ fn generateReassign(self: *Self, reassign: ast.stmt.ZSReassign) ![]const u8 {
                     .field_store = ir.ZSIRFieldStore{
                         .subject = subjectName,
                         .field_name = f.field_name,
+                        .fieldIndex = self.fieldIndices.get(f.startPos) orelse unreachable,
                         .value = irName,
                     },
                 },
@@ -384,6 +544,9 @@ fn generateFunction(self: *Self, func: ast.stmt.ZSFn) ![]const u8 {
     // Determine the function name: mangle if overloaded and not external
     // Always allocate an owned copy so IR can free it uniformly
     const fnName = if (isExtension) blk: {
+        if (!external and (std.mem.indexOfScalar(u8, func.name, '$') != null or std.mem.indexOfScalar(u8, func.name, '.') != null)) {
+            break :blk try self.allocator.dupe(u8, func.name);
+        }
         const key = try std.fmt.allocPrint(self.allocator, "{s}.{s}", .{ func.receiver_type.?, func.name });
         if (external) {
             break :blk key;
@@ -401,15 +564,15 @@ fn generateFunction(self: *Self, func: ast.stmt.ZSFn) ![]const u8 {
         // User-defined function with body — include 'this' for extension functions
         const argNames = if (isExtension) blk: {
             const an = try self.allocator.alloc([]const u8, func.args.len + 1);
-            an[0] = "this";
+            an[0] = try self.allocator.dupe(u8, "this");
             for (func.args, 0..) |arg, i| {
-                an[i + 1] = arg.name;
+                an[i + 1] = try self.allocator.dupe(u8, arg.name);
             }
             break :blk an;
         } else blk: {
             const an = try self.allocator.alloc([]const u8, func.args.len);
             for (func.args, 0..) |arg, i| {
-                an[i] = arg.name;
+                an[i] = try self.allocator.dupe(u8, arg.name);
             }
             break :blk an;
         };
@@ -895,6 +1058,49 @@ fn generateEnumDecl(self: *Self, ed: ast.stmt.ZSEnum) Error![]const u8 {
 }
 
 fn generateEnumInit(self: *Self, ei: ast.expr.ZSEnumInit) Error![]const u8 {
+    // When the analyzer reinterpreted this enum_init as a method call on a variable
+    // (because enum_name is a variable, not an enum type), generate a call instead.
+    const matchingResolvedName = blk: {
+        if (self.resolutions.get(callResolutionKey(ei.startPos, ei.endPos))) |resolvedName| {
+            if (resolvedNameMatchesCallee(resolvedName, ei.variant_name)) break :blk resolvedName;
+        }
+        break :blk null;
+    };
+    const isReinterpretedCall = blk: {
+        if (self.extensionCalls) |ec| {
+            if (ec.contains(callResolutionKey(ei.startPos, ei.endPos))) break :blk true;
+        }
+        if (matchingResolvedName != null) break :blk true;
+        break :blk false;
+    };
+    if (isReinterpretedCall) {
+        // The analyzer reinterpreted this enum_init as a method call on a variable.
+        // Generate: receiver.method(payload) as an extension call.
+        // The receiver name is ei.enum_name, method is ei.variant_name.
+        const receiverName = self.varNames.get(ei.enum_name) orelse ei.enum_name;
+        const resolvedName = matchingResolvedName orelse ei.variant_name;
+
+        var argNames: [][]const u8 = undefined;
+        if (ei.payload) |p| {
+            const payloadName = try self.generateExpr(p.*);
+            argNames = try self.allocator.alloc([]const u8, 2);
+            argNames[0] = receiverName;
+            argNames[1] = payloadName;
+        } else {
+            argNames = try self.allocator.alloc([]const u8, 1);
+            argNames[0] = receiverName;
+        }
+
+        const resultName = try self.generateName();
+        try self.instructions.append(self.allocator, ir.ZSIR{ .call = ir.ZSIRCall{
+            .resultName = resultName,
+            .fnName = resolvedName,
+            .argNames = argNames,
+            .startPos = ei.startPos,
+        } });
+        return resultName;
+    }
+
     // Use the analyzer's enum init info which has the correct (possibly mangled) name
     const initInfo = self.enumInits.get(ei.startPos);
     const enumName = if (initInfo) |info| info.enumName else ei.enum_name;
@@ -943,6 +1149,7 @@ fn zsSymbolTypeToIrName(t: sig.ZSType) []const u8 {
         .long => "long",
         .short => "short",
         .byte => "byte",
+        .void => "void",
         .function => "function",
         .unknown => "unknown",
         .struct_type => |st| st.name,
@@ -1094,11 +1301,140 @@ fn generateMatchExpr(self: *Self, me: ast.expr.ZSMatchExpr) Error![]const u8 {
     return resultName;
 }
 
+fn generateSafeNav(self: *Self, sn: ast.expr.ZSSafeNav) Error![]const u8 {
+    const info = if (self.safeNavInfo) |m| m.get(sn.startPos) else null;
+    if (info == null) return "";
+
+    const snInfo = info.?;
+    const receiverName = try self.generateExpr(sn.receiver.*);
+
+    // Look up Some and None variant tags and payload type for the receiver enum
+    var someTag: u32 = 0;
+    var noneTag: u32 = 1;
+    var someResultTag: u32 = 0;
+    var noneResultTag: u32 = 1;
+    var somePayloadType: ?[]const u8 = null;
+
+    // Search topLevelInstructions for enum_decl matching receiver enum
+    for (self.topLevelInstructions.items) |inst| {
+        if (inst == .enum_decl and std.mem.eql(u8, inst.enum_decl.name, snInfo.receiverEnumName)) {
+            for (inst.enum_decl.variants) |v| {
+                if (std.mem.eql(u8, v.name, "Some")) {
+                    someTag = v.tag;
+                    somePayloadType = v.payloadType;
+                }
+                if (std.mem.eql(u8, v.name, "None")) {
+                    noneTag = v.tag;
+                }
+            }
+            break;
+        }
+    }
+    // Fallback: monomorphizedEnums
+    if (self.monomorphizedEnums) |monoEnums| {
+        if (monoEnums.get(snInfo.receiverEnumName)) |ed| {
+            for (ed.variants) |v| {
+                if (std.mem.eql(u8, v.name, "Some")) {
+                    someTag = v.tag;
+                    if (v.payload_type) |pt| somePayloadType = zsSymbolTypeToIrName(pt);
+                }
+                if (std.mem.eql(u8, v.name, "None")) noneTag = v.tag;
+            }
+        }
+        // Look up result enum tags too
+        if (monoEnums.get(snInfo.resultEnumName)) |ed| {
+            for (ed.variants) |v| {
+                if (std.mem.eql(u8, v.name, "Some")) someResultTag = v.tag;
+                if (std.mem.eql(u8, v.name, "None")) noneResultTag = v.tag;
+            }
+        }
+    }
+
+    // Build Some arm body: field_access on the payload, optionally wrap in Some
+    var someBody = try std.ArrayList(ir.ZSIR).initCapacity(self.allocator, 4);
+    defer someBody.deinit(self.allocator);
+
+    const bindingName = try self.generateName();
+    const fieldResultName = try self.generateName();
+    try someBody.append(self.allocator, ir.ZSIR{ .field_access = .{
+        .resultName = fieldResultName,
+        .subject = bindingName,
+        .field = sn.field,
+        .fieldIndex = snInfo.fieldIndex,
+    } });
+
+    const someArmResult: []const u8 = if (snInfo.isFlatMap)
+        fieldResultName
+    else blk: {
+        const wrappedName = try self.generateName();
+        try someBody.append(self.allocator, ir.ZSIR{ .enum_init = .{
+            .resultName = wrappedName,
+            .enumName = snInfo.resultEnumName,
+            .variantTag = someResultTag,
+            .payload = fieldResultName,
+        } });
+        break :blk wrappedName;
+    };
+
+    // Build None arm body: emit Option.None for the result enum
+    var noneBody = try std.ArrayList(ir.ZSIR).initCapacity(self.allocator, 2);
+    defer noneBody.deinit(self.allocator);
+
+    const noneArmResult = try self.generateName();
+    try noneBody.append(self.allocator, ir.ZSIR{ .enum_init = .{
+        .resultName = noneArmResult,
+        .enumName = snInfo.resultEnumName,
+        .variantTag = noneResultTag,
+        .payload = null,
+    } });
+
+    const arms = try self.allocator.alloc(ir.ZSIRMatchArm, 2);
+    arms[0] = .{
+        .patternKind = .variant_tag,
+        .variantTag = someTag,
+        .binding = bindingName,
+        .bindingType = somePayloadType,
+        .body = try self.allocator.dupe(ir.ZSIR, someBody.items),
+        .resultName = someArmResult,
+    };
+    arms[1] = .{
+        .patternKind = .variant_tag,
+        .variantTag = noneTag,
+        .binding = null,
+        .bindingType = null,
+        .body = try self.allocator.dupe(ir.ZSIR, noneBody.items),
+        .resultName = noneArmResult,
+    };
+
+    const resultName = try self.generateName();
+    try self.instructions.append(self.allocator, ir.ZSIR{ .match_expr = .{
+        .resultName = resultName,
+        .subject = receiverName,
+        .enumName = snInfo.receiverEnumName,
+        .arms = arms,
+        .has_else = false,
+        .else_body = null,
+        .else_result_name = null,
+    } });
+    return resultName;
+}
+
 fn generateLambda(self: *Self, lambda: ast.expr.ZSLambda) Error![]const u8 {
     const lambdaName = if (self.lambdaNames) |ln|
         ln.get(lambda.startPos) orelse "__lambda_unknown"
     else
         "__lambda_unknown";
+    return self.generateLambdaBody(lambdaName, lambda.startPos, lambda.params, lambda.body.*, lambda.implicit_params_from_context);
+}
+
+fn generateLambdaBody(
+    self: *Self,
+    lambdaName: []const u8,
+    startPos: usize,
+    params: []const ast.expr.ZSLambdaParam,
+    body: ast.expr.ZSExpr,
+    implicitParamsFromContext: bool,
+) Error![]const u8 {
 
     // Generate body instructions into a separate list
     var lambdaInstructions = try std.ArrayList(ir.ZSIR).initCapacity(self.allocator, 4);
@@ -1107,45 +1443,102 @@ fn generateLambda(self: *Self, lambda: ast.expr.ZSLambda) Error![]const u8 {
     const outerInstructions = self.instructions;
     self.instructions = &lambdaInstructions;
 
-    // Create isolated scope for lambda params
+    // Inner scope contains ONLY explicit params (not outer vars).
+    // Outer vars are accessible via outerVarNamesForCapture — references that
+    // fall through to the outer scope are recorded as CaptureEntry values.
+    const resolvedFnType: ?sig.ZSFunction = if (self.lambdaTypes) |lt|
+        if (lt.get(startPos)) |t| (if (t == .function) t.function else null) else null
+    else
+        null;
+
     var innerVarNames = std.StringHashMap([]const u8).init(self.allocator);
-    var outerIter = self.varNames.iterator();
-    while (outerIter.next()) |entry| {
-        try innerVarNames.put(entry.key_ptr.*, entry.value_ptr.*);
+    const synthesizedImplicitIt = implicitParamsFromContext and resolvedFnType != null and resolvedFnType.?.args.len == 1;
+    if (synthesizedImplicitIt) {
+        try innerVarNames.put("it", "it");
     }
-    for (lambda.params) |param| {
+    for (params) |param| {
         try innerVarNames.put(param.name, param.name);
     }
     const outerVarNames = self.varNames;
     self.varNames = innerVarNames;
 
-    const bodyResult = try self.generateExpr(lambda.body.*);
+    // Set up capture tracking
+    var captureList = try std.ArrayList(CaptureEntry).initCapacity(self.allocator, 4);
+    defer captureList.deinit(self.allocator);
+    var capturedSet = std.StringHashMap(void).init(self.allocator);
+    defer capturedSet.deinit();
+    const outerCapturedSet = self.capturedVarNamesSet;
+    self.outerVarNamesForCapture = &outerVarNames;
+    self.currentLambdaCaptures = &captureList;
+    self.capturedVarNamesSet = &capturedSet;
+
+    const bodyResult = try self.generateExpr(body);
 
     // Add implicit return for expression body
-    if (lambda.body.* != .block) {
+    if (body != .block) {
         try self.instructions.append(self.allocator, ir.ZSIR{ .ret = .{ .value = bodyResult } });
     }
 
     // Restore state
     self.instructions = outerInstructions;
+    self.outerVarNamesForCapture = null;
+    self.currentLambdaCaptures = null;
+    self.capturedVarNamesSet = outerCapturedSet;
     var modifiedInner = self.varNames;
     self.varNames = outerVarNames;
     modifiedInner.deinit();
 
-    // Build arg names/types for the lambda function
-    const argNames = try self.allocator.alloc([]const u8, lambda.params.len);
-    const argTypes = try self.allocator.alloc([]const u8, lambda.params.len);
-    for (lambda.params, 0..) |param, i| {
-        argNames[i] = param.name;
-        argTypes[i] = "unknown";
+    // Build arg names/types: [__cap_0, __cap_1, ..., param0, param1, ...]
+    // Capture params are pointers (i64-encoded) for capture-by-reference semantics.
+    const captureLen = captureList.items.len;
+    const totalArgs = captureLen + params.len + @as(usize, if (synthesizedImplicitIt) 1 else 0);
+    const argNames = try self.allocator.alloc([]const u8, totalArgs);
+    const argTypes = try self.allocator.alloc([]const u8, totalArgs);
+    for (captureList.items, 0..) |cap, i| {
+        argNames[i] = cap.paramName; // ownership transferred to fn_def; NOT duped so ZSIRArith.rhs stays valid
+        argTypes[i] = try self.allocator.dupe(u8, "long"); // i64 for pointer-encoded captures
+    }
+    var paramOffset = captureLen;
+    if (synthesizedImplicitIt) {
+        argNames[paramOffset] = try self.allocator.dupe(u8, "it");
+        const implicitType: []const u8 = if (resolvedFnType) |ft| blk: {
+            const t = zsSymbolTypeToIrName(ft.args[0].type);
+            break :blk if (std.mem.eql(u8, t, "unknown")) "number" else t;
+        } else "number";
+        argTypes[paramOffset] = try self.allocator.dupe(u8, implicitType);
+        paramOffset += 1;
+    }
+    for (params, 0..) |param, i| {
+        argNames[paramOffset + i] = try self.allocator.dupe(u8, param.name);
+        // Use resolved param type; fall back to "number" for unknown (codegen compat)
+        const resolvedArgType: []const u8 = if (resolvedFnType) |ft|
+            if (i < ft.args.len) blk: {
+                const t = zsSymbolTypeToIrName(ft.args[i].type);
+                break :blk if (std.mem.eql(u8, t, "unknown")) "number" else t;
+            } else "number"
+        else
+            "number";
+        argTypes[paramOffset + i] = try self.allocator.dupe(u8, resolvedArgType);
+    }
+
+    // Resolve return type; fall back to "number" for unknown
+    const resolvedRetType: []const u8 = if (resolvedFnType) |ft| blk: {
+        const t = zsSymbolTypeToIrName(ft.ret.*);
+        break :blk if (std.mem.eql(u8, t, "unknown")) "number" else t;
+    } else "number";
+
+    // Store captures for call-site prepending (owned slice; paramName strings owned by map)
+    if (captureLen > 0) {
+        const storedCaptures = try self.allocator.dupe(CaptureEntry, captureList.items);
+        try self.lambdaCaptureMap.put(lambdaName, storedCaptures);
     }
 
     // Emit fn_def at top level
     try self.topLevelInstructions.append(self.allocator, ir.ZSIR{ .fn_def = .{
-        .name = lambdaName,
+        .name = try self.allocator.dupe(u8, lambdaName),
         .argNames = argNames,
         .argTypes = argTypes,
-        .retType = "unknown",
+        .retType = try self.allocator.dupe(u8, resolvedRetType),
         .body = try self.allocator.dupe(ir.ZSIR, lambdaInstructions.items),
     } });
 
@@ -1196,6 +1589,7 @@ fn typeToString(zsType: Symbol.ZSType) []const u8 {
         .long => "long",
         .short => "short",
         .byte => "byte",
+        .void => "void",
         .function => "function",
         .unknown => "unknown",
         .struct_type => |st| st.name,

@@ -11,12 +11,19 @@ import org.chisa.intellij.ChisaFile
 @Service(Service.Level.PROJECT)
 class ChisaPreludeService(private val project: Project) {
 
+    @Volatile private var cachedPreludeVFile: VirtualFile? = null
+
     fun getPreludeFile(): ChisaFile? {
         val stdlibPath = ChisaSettings.getInstance(project).stdlibPath
-        if (stdlibPath.isBlank()) return null
-        val stdlibDir = findDirectory(stdlibPath) ?: return null
-        val preludeVf = stdlibDir.findChild("prelude.chisa") ?: return null
-        return PsiManager.getInstance(project).findFile(preludeVf) as? ChisaFile
+        if (stdlibPath.isBlank()) {
+            cachedPreludeVFile = null
+            return null
+        }
+        val vFile = cachedPreludeVFile?.takeIf { it.isValid } ?: run {
+            val dir = findDirectory(stdlibPath) ?: return null
+            (dir.findChild("prelude.chisa") ?: return null).also { cachedPreludeVFile = it }
+        }
+        return PsiManager.getInstance(project).findFile(vFile) as? ChisaFile
     }
 
     private fun findDirectory(path: String): VirtualFile? {

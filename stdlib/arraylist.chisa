@@ -1,5 +1,5 @@
 export struct List<T> {
-  data: Pointer<T>,
+  data: Pointer<char>,
   len: number,
   cap: number,
 }
@@ -9,35 +9,35 @@ export fn newList<T>(elem_size: number): List<T> {
   return List<T> { data: alloc(cap * elem_size), len: 0, cap: cap }
 }
 
-export fn listPush<T>(list: List<T>, val: T, elem_size: number): List<T> {
-  if (list.len >= list.cap) {
-    list = listGrow<T>(list, elem_size)
+export fn List<T>.push(val: T): List<T> {
+  if (this.len >= this.cap) {
+    return this.grow()
   }
-  let d = list.data
-  d[list.len] = val
-  return List<T> { data: list.data, len: list.len + 1, cap: list.cap }
+  let d = this.data
+  d[this.len * 8] = val
+  return List<T> { data: this.data, len: this.len + 1, cap: this.cap }
 }
 
-export fn listGet<T>(list: List<T>, i: number): T {
-  let d = list.data
-  return d[i]
+export fn List<T>.get(i: number): T {
+  let d = this.data
+  return d[i * 8]
 }
 
-export fn listSet<T>(list: List<T>, i: number, val: T): void {
-  let d = list.data
-  d[i] = val
+export fn List<T>.set(i: number, val: T): void {
+  let d = this.data
+  d[i * 8] = val
 }
 
-export fn listGrow<T>(list: List<T>, elem_size: number): List<T> {
-  let new_cap = list.cap * 2
-  let new_data = alloc(new_cap * elem_size)
-  for (let i = 0; i < list.len * elem_size; i = i + 1) {
-    new_data[i] = list.data[i]
+export fn List<T>.grow(): List<T> {
+  let new_cap = this.cap * 2
+  let new_data = alloc(new_cap * 8)
+  for (let i = 0; i < this.len * 8; i = i + 1) {
+    new_data[i] = this.data[i]
   }
-  free(list.data, list.cap * elem_size)
-  return List<T> { data: new_data, len: list.len, cap: new_cap }
+  free(this.data, this.cap * 8)
+  return List<T> { data: new_data, len: this.len, cap: new_cap }
 }
 
-export fn listFree<T>(list: List<T>, elem_size: number): void {
-  free(list.data, list.cap * elem_size)
+export fn List<T>.freeList(): void {
+  free(this.data, this.cap * 8)
 }

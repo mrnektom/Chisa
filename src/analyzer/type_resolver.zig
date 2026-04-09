@@ -17,6 +17,7 @@ pub fn typeToString(zsType: Symbol.ZSTypeNotation) []const u8 {
         .long => "long",
         .short => "short",
         .byte => "byte",
+        .void => "void",
         .function => "function",
         .unknown => "unknown",
         .struct_type => |st| st.name,
@@ -85,14 +86,32 @@ pub fn typesCompatible(dst: Symbol.ZSTypeNotation, src: Symbol.ZSTypeNotation) b
 
 pub fn resolveTypeAnnotationFull(self: anytype, astType: ast.ZSTypeNotation) Error!Symbol.ZSTypeNotation {
     const maxDepth = 32;
-    if (self.typeResolutionDepth >= maxDepth) return .unknown;
+    if (self.typeResolutionDepth >= maxDepth) {
+        try self.errors.append(self.allocator, .{
+            .message = "type annotation is too deeply nested (limit: 32 levels): break it up using type aliases",
+            .severity = .err,
+            .phase = .analyze,
+            .filename = self.module.filename,
+        });
+        return .unknown;
+    }
     self.typeResolutionDepth += 1;
     defer self.typeResolutionDepth -= 1;
 
     switch (astType) {
         .reference => |ref| {
+            // Check if it's a type parameter with active resolved bindings first so
+            // generic types like Option<number> survive contextual inference.
+            if (self.typeParamSymbolBindings) |bindings| {
+                for (bindings.typeParams, 0..) |tp, i| {
+                    if (std.mem.eql(u8, ref, tp)) {
+                        return bindings.bindings[i];
+                    }
+                }
+            }
             // Scalar types registered from stdlib scalar declarations
             if (self.scalarDefs.get(ref)) |t| return t;
+            if (std.mem.eql(u8, ref, "void")) return .void;
             // Check if it's a known struct type (non-generic)
             if (self.structDefs.get(ref)) |sd| {
                 if (sd.type_params.len == 0) {
@@ -144,7 +163,14 @@ pub fn resolveTypeAnnotationFull(self: anytype, astType: ast.ZSTypeNotation) Err
             // Check type aliases for generic types
             if (self.typeAliases.get(g.name)) |alias| {
                 if (alias.type_params.len == g.type_args.len) {
-                    return try resolveTypeAnnotationFull(self, alias.aliased_type);
+                    const bindingStrs = try self.allocator.alloc([]const u8, g.type_args.len);
+                    try self.allocatedSliceLists.append(self.allocator, bindingStrs);
+                    for (g.type_args, 0..) |typeArg, i| {
+                        const resolved = try resolveTypeAnnotationFull(self, typeArg);
+                        bindingStrs[i] = typeToString(resolved);
+                    }
+                    const substituted = try substituteAstType(self, alias.aliased_type, alias.type_params, bindingStrs);
+                    return try resolveTypeAnnotationFull(self, substituted);
                 }
             }
             // Pointer<T> is represented as ZSTypeNotation.pointer, not as a struct
@@ -209,8 +235,46 @@ pub fn resolveFieldType(self: anytype, fieldAstType: ast.type_notation.ZSTypeNot
             // Otherwise resolve normally
             return try resolveTypeAnnotationFull(self, fieldAstType);
         },
-        .generic, .array, .fn_type => {
-            return try resolveTypeAnnotationFull(self, fieldAstType);
+        .generic => |g| {
+            // Resolve each type arg through resolveFieldType so outer type params are substituted
+            // with their actual Symbol.ZSTypeNotation values rather than lossy string names.
+            const resolvedArgs = try self.allocator.alloc(Symbol.ZSTypeNotation, g.type_args.len);
+            try self.allocatedTypeSlices.append(self.allocator, resolvedArgs);
+            for (g.type_args, 0..) |ta, i| {
+                resolvedArgs[i] = try resolveFieldType(self, ta, typeParams, resolvedTypeArgs);
+            }
+            if (std.mem.eql(u8, g.name, "Pointer") and resolvedArgs.len == 1) {
+                const innerPtr = try self.allocator.create(Symbol.ZSTypeNotation);
+                innerPtr.* = resolvedArgs[0];
+                try self.allocatedTypes.append(self.allocator, innerPtr);
+                return Symbol.ZSTypeNotation{ .pointer = innerPtr };
+            }
+            if (self.structDefs.get(g.name)) |sd| {
+                return try instantiateStructFromResolved(self, sd, resolvedArgs);
+            }
+            if (self.enumDefs.get(g.name)) |ed| {
+                return try instantiateEnumFromResolved(self, ed, resolvedArgs);
+            }
+            return .unknown;
+        },
+        .array => |a| {
+            const elemType = try resolveFieldType(self, a.element_type.*, typeParams, resolvedTypeArgs);
+            const elemPtr = try self.allocator.create(Symbol.ZSTypeNotation);
+            elemPtr.* = elemType;
+            try self.allocatedTypes.append(self.allocator, elemPtr);
+            return Symbol.ZSTypeNotation{ .array_type = .{ .element_type = elemPtr, .size = 0 } };
+        },
+        .fn_type => |ft| {
+            const retType = try resolveFieldType(self, ft.return_type.*, typeParams, resolvedTypeArgs);
+            const retPtr = try self.allocator.create(Symbol.ZSTypeNotation);
+            retPtr.* = retType;
+            try self.allocatedTypes.append(self.allocator, retPtr);
+            const args = try self.allocator.alloc(sig.ZSFnArg, ft.param_types.len);
+            try self.allocatedFnArgs.append(self.allocator, args);
+            for (ft.param_types, 0..) |pt, i| {
+                args[i] = .{ .name = "", .type = try resolveFieldType(self, pt, typeParams, resolvedTypeArgs) };
+            }
+            return Symbol.ZSTypeNotation{ .function = .{ .ret = retPtr, .args = args } };
         },
     }
 }
@@ -256,6 +320,24 @@ pub fn buildEnumType(self: anytype, ed: EnumDef) Error!Symbol.ZSTypeNotation {
         .name = ed.name,
         .variants = variants,
         .type_args = &.{},
+    } };
+}
+
+pub fn instantiateStructFromResolved(self: anytype, sd: StructDef, resolvedTypeArgs: []const Symbol.ZSTypeNotation) Error!Symbol.ZSTypeNotation {
+    if (resolvedTypeArgs.len != sd.type_params.len) return .unknown;
+
+    const resolvedFields = try self.allocator.alloc(sig.ZSStructField, sd.fields.len);
+    try self.allocatedStructFields.append(self.allocator, resolvedFields);
+
+    for (sd.fields, 0..) |field, i| {
+        const fieldType = try resolveFieldType(self, field.type, sd.type_params, resolvedTypeArgs);
+        resolvedFields[i] = .{ .name = field.name, .type = fieldType };
+    }
+
+    return Symbol.ZSTypeNotation{ .struct_type = .{
+        .name = sd.name,
+        .fields = resolvedFields,
+        .type_args = resolvedTypeArgs,
     } };
 }
 
@@ -326,6 +408,18 @@ pub fn resolveConcreteRetType(self: anytype, gfn: GenericFnDef, bindings: []cons
     return Symbol.ZSTypeNotation.unknown;
 }
 
+pub fn resolveConcreteRetTypeWithSymbolBindings(
+    self: anytype,
+    gfn: GenericFnDef,
+    symbolBindings: []const Symbol.ZSTypeNotation,
+) Error!Symbol.ZSTypeNotation {
+    if (gfn.func.ret) |ret| {
+        const substituted = try substituteAstTypeWithSymbolBindings(self, ret, gfn.type_params, symbolBindings);
+        return try resolveTypeAnnotationFull(self, substituted);
+    }
+    return Symbol.ZSTypeNotation.unknown;
+}
+
 /// Substitute type parameter references in an AST type with concrete type names.
 pub fn substituteAstType(self: anytype, t: ast.ZSTypeNotation, typeParams: []const []const u8, bindings: []const []const u8) !ast.ZSTypeNotation {
     switch (t) {
@@ -364,6 +458,99 @@ pub fn substituteAstType(self: anytype, t: ast.ZSTypeNotation, typeParams: []con
     }
 }
 
+/// Convert a resolved Symbol.ZSTypeNotation back to an AST type annotation, preserving type
+/// arguments.  Used to build non-lossy substitution bindings from already-resolved symbols so
+/// that parameterised types like Option<number> round-trip correctly through substituteAstType.
+pub fn symbolTypeToAstAnnotation(self: anytype, t: Symbol.ZSTypeNotation) !ast.ZSTypeNotation {
+    return switch (t) {
+        .number => .{ .reference = "number" },
+        .boolean => .{ .reference = "boolean" },
+        .char => .{ .reference = "char" },
+        .long => .{ .reference = "long" },
+        .short => .{ .reference = "short" },
+        .byte => .{ .reference = "byte" },
+        .void => .{ .reference = "void" },
+        .unknown => .{ .reference = "unknown" },
+        .function => .{ .reference = "function" },
+        .pointer => |inner| {
+            const typeArgs = try self.allocator.alloc(ast.type_notation.ZSTypeNotation, 1);
+            try self.allocatedAstTypeSlices.append(self.allocator, typeArgs);
+            typeArgs[0] = try symbolTypeToAstAnnotation(self, inner.*);
+            return .{ .generic = .{ .name = "Pointer", .type_args = typeArgs } };
+        },
+        .array_type => |arr| {
+            const elemPtr = try self.allocator.create(ast.type_notation.ZSTypeNotation);
+            try self.allocatedAstTypes.append(self.allocator, elemPtr);
+            elemPtr.* = try symbolTypeToAstAnnotation(self, arr.element_type.*);
+            return .{ .array = .{ .element_type = elemPtr } };
+        },
+        .struct_type => |st| {
+            if (st.type_args.len == 0) return .{ .reference = st.name };
+            const typeArgs = try self.allocator.alloc(ast.type_notation.ZSTypeNotation, st.type_args.len);
+            try self.allocatedAstTypeSlices.append(self.allocator, typeArgs);
+            for (st.type_args, 0..) |ta, i| {
+                typeArgs[i] = try symbolTypeToAstAnnotation(self, ta);
+            }
+            return .{ .generic = .{ .name = st.name, .type_args = typeArgs } };
+        },
+        .enum_type => |et| {
+            if (et.type_args.len == 0) return .{ .reference = et.name };
+            const typeArgs = try self.allocator.alloc(ast.type_notation.ZSTypeNotation, et.type_args.len);
+            try self.allocatedAstTypeSlices.append(self.allocator, typeArgs);
+            for (et.type_args, 0..) |ta, i| {
+                typeArgs[i] = try symbolTypeToAstAnnotation(self, ta);
+            }
+            return .{ .generic = .{ .name = et.name, .type_args = typeArgs } };
+        },
+    };
+}
+
+/// Like substituteAstType but bindings are pre-resolved Symbol.ZSTypeNotation values.
+/// Preserves parameterised types (e.g. Option<number>) instead of reducing them to bare
+/// reference names via typeToString.
+pub fn substituteAstTypeWithSymbolBindings(
+    self: anytype,
+    t: ast.ZSTypeNotation,
+    typeParams: []const []const u8,
+    symbolBindings: []const Symbol.ZSTypeNotation,
+) !ast.ZSTypeNotation {
+    switch (t) {
+        .reference => |ref| {
+            for (typeParams, 0..) |tp, i| {
+                if (std.mem.eql(u8, ref, tp)) {
+                    return try symbolTypeToAstAnnotation(self, symbolBindings[i]);
+                }
+            }
+            return t;
+        },
+        .generic => |g| {
+            const newTypeArgs = try self.allocator.alloc(ast.type_notation.ZSTypeNotation, g.type_args.len);
+            try self.allocatedAstTypeSlices.append(self.allocator, newTypeArgs);
+            for (g.type_args, 0..) |ta, i| {
+                newTypeArgs[i] = try substituteAstTypeWithSymbolBindings(self, ta, typeParams, symbolBindings);
+            }
+            return ast.ZSTypeNotation{ .generic = .{ .name = g.name, .type_args = newTypeArgs } };
+        },
+        .array => |a| {
+            const newElem = try self.allocator.create(ast.type_notation.ZSTypeNotation);
+            try self.allocatedAstTypes.append(self.allocator, newElem);
+            newElem.* = try substituteAstTypeWithSymbolBindings(self, a.element_type.*, typeParams, symbolBindings);
+            return ast.ZSTypeNotation{ .array = .{ .element_type = newElem } };
+        },
+        .fn_type => |ft| {
+            const newParamTypes = try self.allocator.alloc(ast.type_notation.ZSTypeNotation, ft.param_types.len);
+            try self.allocatedAstTypeSlices.append(self.allocator, newParamTypes);
+            for (ft.param_types, 0..) |pt, i| {
+                newParamTypes[i] = try substituteAstTypeWithSymbolBindings(self, pt, typeParams, symbolBindings);
+            }
+            const newRetType = try self.allocator.create(ast.type_notation.ZSTypeNotation);
+            try self.allocatedAstTypes.append(self.allocator, newRetType);
+            newRetType.* = try substituteAstTypeWithSymbolBindings(self, ft.return_type.*, typeParams, symbolBindings);
+            return ast.ZSTypeNotation{ .fn_type = .{ .param_types = newParamTypes, .return_type = newRetType } };
+        },
+    }
+}
+
 /// Substitute a type param name using the current bindings context.
 /// E.g., if bindings map T -> number, returns "number" for input "T".
 pub fn substituteTypeParamName(self: anytype, name: []const u8) []const u8 {
@@ -375,4 +562,47 @@ pub fn substituteTypeParamName(self: anytype, name: []const u8) []const u8 {
         }
     }
     return name;
+}
+
+pub fn typeToBindingString(self: anytype, t: Symbol.ZSTypeNotation) ![]const u8 {
+    var buf = try std.ArrayList(u8).initCapacity(self.allocator, 16);
+    defer buf.deinit(self.allocator);
+    try appendTypeBindingString(self, &buf, t);
+    return try self.allocator.dupe(u8, buf.items);
+}
+
+fn appendTypeBindingString(self: anytype, buf: *std.ArrayList(u8), t: Symbol.ZSTypeNotation) !void {
+    switch (t) {
+        .number => try buf.appendSlice(self.allocator, "number"),
+        .boolean => try buf.appendSlice(self.allocator, "boolean"),
+        .char => try buf.appendSlice(self.allocator, "char"),
+        .long => try buf.appendSlice(self.allocator, "long"),
+        .short => try buf.appendSlice(self.allocator, "short"),
+        .byte => try buf.appendSlice(self.allocator, "byte"),
+        .void => try buf.appendSlice(self.allocator, "void"),
+        .unknown => try buf.appendSlice(self.allocator, "unknown"),
+        .function => try buf.appendSlice(self.allocator, "function"),
+        .pointer => |inner| {
+            try buf.appendSlice(self.allocator, "Pointer$");
+            try appendTypeBindingString(self, buf, inner.*);
+        },
+        .array_type => |arr| {
+            try buf.appendSlice(self.allocator, "Array$");
+            try appendTypeBindingString(self, buf, arr.element_type.*);
+        },
+        .struct_type => |st| {
+            try buf.appendSlice(self.allocator, st.name);
+            for (st.type_args) |ta| {
+                try buf.append(self.allocator, '$');
+                try appendTypeBindingString(self, buf, ta);
+            }
+        },
+        .enum_type => |et| {
+            try buf.appendSlice(self.allocator, et.name);
+            for (et.type_args) |ta| {
+                try buf.append(self.allocator, '$');
+                try appendTypeBindingString(self, buf, ta);
+            }
+        },
+    }
 }

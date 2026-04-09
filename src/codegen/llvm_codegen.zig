@@ -87,11 +87,37 @@ pub fn generateLLVMModule(
     // Always register String
     try structTypeRegistry.put("String", getStringType());
 
-    // Register struct types from analyzer (skip types already registered, e.g. String)
+    const module: types.LLVMModuleRef = core.LLVMModuleCreateWithName("zs_module");
+    errdefer core.LLVMDisposeModule(module);
+
+    // Pre-register named opaque structs so enum payloads can refer to them even
+    // before we know their full field layouts.
     if (structFieldTypes) |sft| {
         var iter = sft.iterator();
         while (iter.next()) |entry| {
             if (structTypeRegistry.contains(entry.key_ptr.*)) continue;
+            const nameZ = try allocator.dupeZ(u8, entry.key_ptr.*);
+            defer allocator.free(nameZ);
+            const structType = core.LLVMStructCreateNamed(core.LLVMGetGlobalContext(), nameZ.ptr);
+            try structTypeRegistry.put(entry.key_ptr.*, structType);
+        }
+    }
+
+    // Pre-register enum types so struct fields like Option<T> resolve to concrete
+    // LLVM types rather than falling back to opaque pointers during struct setup.
+    for (instructions.instructions) |inst| {
+        if (inst == .enum_decl and !std.mem.containsAtLeast(u8, inst.enum_decl.name, 1, "__"))
+            try generateEnumDeclCodegen(module, inst.enum_decl, allocator);
+    }
+    for (instructions.instructions) |inst| {
+        if (inst == .enum_decl and std.mem.containsAtLeast(u8, inst.enum_decl.name, 1, "__"))
+            try generateEnumDeclCodegen(module, inst.enum_decl, allocator);
+    }
+
+    // Register struct types from analyzer (skip types already registered, e.g. String)
+    if (structFieldTypes) |sft| {
+        var iter = sft.iterator();
+        while (iter.next()) |entry| {
             const fieldTypeNames = entry.value_ptr.*;
             const fieldLLVMTypes = try allocator.alloc(types.LLVMTypeRef, fieldTypeNames.len);
             defer allocator.free(fieldLLVMTypes);
@@ -99,13 +125,16 @@ pub fn generateLLVMModule(
                 fieldLLVMTypes[i] = mapType(ft);
             }
             const count: c_uint = @intCast(fieldTypeNames.len);
-            const structType = core.LLVMStructType(fieldLLVMTypes.ptr, count, 0);
-            try structTypeRegistry.put(entry.key_ptr.*, structType);
+            const structType = structTypeRegistry.get(entry.key_ptr.*) orelse blk: {
+                const nameZ = try allocator.dupeZ(u8, entry.key_ptr.*);
+                defer allocator.free(nameZ);
+                const created = core.LLVMStructCreateNamed(core.LLVMGetGlobalContext(), nameZ.ptr);
+                try structTypeRegistry.put(entry.key_ptr.*, created);
+                break :blk created;
+            };
+            core.LLVMStructSetBody(structType, fieldLLVMTypes.ptr, count, 0);
         }
     }
-
-    const module: types.LLVMModuleRef = core.LLVMModuleCreateWithName("zs_module");
-    errdefer core.LLVMDisposeModule(module);
 
     // Initialize DWARF debug info if requested
     debugInfoState = null;
@@ -119,10 +148,22 @@ pub fn generateLLVMModule(
             di_builder,
             .LLVMDWARFSourceLanguageC,
             di_file,
-            "ZenScript", 9,
-            0, "", 0, 0, "", 0,
+            "ZenScript",
+            9,
+            0,
+            "",
+            0,
+            0,
+            "",
+            0,
             .LLVMDWARFEmissionFull,
-            0, 0, 0, "", 0, "", 0,
+            0,
+            0,
+            0,
+            "",
+            0,
+            "",
+            0,
         );
         debugInfoState = .{
             .di_builder = di_builder,
@@ -165,18 +206,6 @@ pub fn generateLLVMModule(
     defer core.LLVMDisposeBuilder(builder);
 
     core.LLVMPositionBuilderAtEnd(builder, entry);
-
-    // Pre-pass: register all enum type declarations before forward-declaring functions.
-    // Plain enums must be registered before monomorphized generic enums (which may reference them
-    // as payload types). Monomorphized names contain "__" by the mangling convention.
-    for (instructions.instructions) |inst| {
-        if (inst == .enum_decl and !std.mem.containsAtLeast(u8, inst.enum_decl.name, 1, "__"))
-            try generateEnumDeclCodegen(module, inst.enum_decl, allocator);
-    }
-    for (instructions.instructions) |inst| {
-        if (inst == .enum_decl and std.mem.containsAtLeast(u8, inst.enum_decl.name, 1, "__"))
-            try generateEnumDeclCodegen(module, inst.enum_decl, allocator);
-    }
 
     // Pre-pass: forward-declare all functions so they can reference each other
     try forwardDeclareAll(module, instructions.instructions, allocator);
@@ -289,6 +318,7 @@ fn generateInstruction(
         .field_access => try generateFieldAccess(builder, locals, instruction.field_access),
         .ptr_op => try generatePtrOp(builder, locals, instruction.ptr_op),
         .deref_op => try generateDerefOp(builder, locals, instruction.deref_op),
+        .store_ptr => try generateStorePtr(builder, locals, instruction.store_ptr),
         .enum_decl => try generateEnumDeclCodegen(module, instruction.enum_decl, allocator),
         .enum_init => try generateEnumInitCodegen(builder, module, locals, instruction.enum_init, allocator),
         .match_expr => try generateMatchCodegen(builder, module, locals, instruction.match_expr, allocator, loopCtx),
@@ -304,7 +334,8 @@ fn generateInstruction(
         },
         .not_op => try generateNot(builder, locals, instruction.not_op),
         .asm_block => try generateAsmBlock(builder, locals, instruction.asm_block, allocator),
-        .alloc_op, .free_op, .field_store => {},
+        .alloc_op, .free_op => {},
+        .field_store => try generateFieldStore(builder, locals, instruction.field_store),
     }
 }
 
@@ -434,16 +465,27 @@ fn generateFnDefWithGlobals(
         else
             1;
         const sub_type = debuginfo.LLVMDIBuilderCreateSubroutineType(
-            di.di_builder, di.file, null, 0, .LLVMDIFlagZero,
+            di.di_builder,
+            di.file,
+            null,
+            0,
+            .LLVMDIFlagZero,
         );
         const sp = debuginfo.LLVMDIBuilderCreateFunction(
-            di.di_builder, di.compile_unit,
-            nameZ.ptr, def.name.len,
-            nameZ.ptr, def.name.len,
-            di.file, fn_line,
+            di.di_builder,
+            di.compile_unit,
+            nameZ.ptr,
+            def.name.len,
+            nameZ.ptr,
+            def.name.len,
+            di.file,
+            fn_line,
             sub_type,
-            0, 1, fn_line,
-            .LLVMDIFlagZero, 0,
+            0,
+            1,
+            fn_line,
+            .LLVMDIFlagZero,
+            0,
         );
         debuginfo.LLVMSetSubprogram(func, sp);
         di.current_scope = sp;
@@ -555,7 +597,7 @@ fn generateBranch(
     const elseBlock = core.LLVMAppendBasicBlock(currentFunc, "else");
     const mergeBlock = core.LLVMAppendBasicBlock(currentFunc, "merge");
 
-    _ = core.LLVMBuildCondBr(builder, condBool, thenBlock, elseBlock);
+    const condBr = core.LLVMBuildCondBr(builder, condBool, thenBlock, elseBlock);
 
     // Then block
     core.LLVMPositionBuilderAtEnd(builder, thenBlock);
@@ -587,6 +629,9 @@ fn generateBranch(
     if (branch.resultName) |resName| {
         const resultTy: types.LLVMTypeRef = if (thenResultLocal) |l| l.ty else if (elseResultLocal) |l| l.ty else null;
         if (resultTy) |ty| {
+            // The result storage must dominate both branches, so insert it before
+            // the original conditional branch rather than in the merge block.
+            core.LLVMPositionBuilderBefore(builder, condBr);
             const resultPtr = core.LLVMBuildAlloca(builder, ty, "ifres");
             // Store from then-branch: go back, insert store before the terminator
             if (thenTerm == null) {
@@ -703,6 +748,11 @@ fn generateArith(
             rhsWidth = core.LLVMGetIntTypeWidth(local.ty);
         }
     } else {
+        std.debug.print("DEBUG arith: rhs '{s}' (len={d}) not in locals\n", .{ arithInst.rhs, arithInst.rhs.len });
+        var it = locals.iterator();
+        while (it.next()) |entry| {
+            std.debug.print("  local key: '{s}' (len={d})\n", .{ entry.key_ptr.*, entry.key_ptr.*.len });
+        }
         return;
     }
 
@@ -961,7 +1011,52 @@ fn generateCall(
     const fnNameZ = try allocator.dupeZ(u8, call.fnName);
     defer allocator.free(fnNameZ);
     const funcRef = core.LLVMGetNamedFunction(module, fnNameZ.ptr);
-    if (funcRef == null) return;
+    const indirectFuncLocal = if (funcRef == null) locals.get(call.fnName) else null;
+    if (funcRef == null and indirectFuncLocal == null) {
+        std.debug.print("warning: generateCall: function '{s}' not found\n", .{call.fnName});
+        return;
+    }
+
+    if (funcRef == null) {
+        const fnLocal = indirectFuncLocal.?;
+        const args = try allocator.alloc(types.LLVMValueRef, call.argNames.len);
+        defer allocator.free(args);
+        const paramTypes = try allocator.alloc(types.LLVMTypeRef, call.argNames.len);
+        defer allocator.free(paramTypes);
+
+        for (call.argNames, 0..) |argName, i| {
+            if (locals.get(argName)) |local| {
+                args[i] = core.LLVMBuildLoad2(builder, local.ty, local.ptr, "arg");
+                paramTypes[i] = local.ty;
+            } else {
+                const argNameZ = try allocator.dupeZ(u8, argName);
+                defer allocator.free(argNameZ);
+                const argFuncRef = core.LLVMGetNamedFunction(module, argNameZ.ptr);
+                if (argFuncRef != null) {
+                    args[i] = argFuncRef.?;
+                    paramTypes[i] = core.LLVMGlobalGetValueType(argFuncRef.?);
+                } else {
+                    std.debug.print("warning: generateCall: missing local '{s}' for argument {d} of indirect '{s}'\n", .{ argName, i, call.fnName });
+                    return;
+                }
+            }
+        }
+
+        const retType = if (call.argNames.len > 0) paramTypes[0] else core.LLVMInt32Type();
+        const indirectFnType = core.LLVMFunctionType(retType, paramTypes.ptr, @intCast(call.argNames.len), 0);
+        const indirectFnPtrType = core.LLVMPointerType(indirectFnType, 0);
+        const loadedFn = core.LLVMBuildLoad2(builder, fnLocal.ty, fnLocal.ptr, "fnptr");
+        const typedFn = if (core.LLVMGetTypeKind(fnLocal.ty) == .LLVMIntegerTypeKind)
+            core.LLVMBuildIntToPtr(builder, loadedFn, indirectFnPtrType, "fncast")
+        else
+            core.LLVMBuildBitCast(builder, loadedFn, indirectFnPtrType, "fncast");
+
+        const result = core.LLVMBuildCall2(builder, indirectFnType, typedFn, args.ptr, @intCast(call.argNames.len), "call_result");
+        const ptr = core.LLVMBuildAlloca(builder, retType, "callres");
+        _ = core.LLVMBuildStore(builder, result, ptr);
+        try locals.put(call.resultName, LocalVar{ .ptr = ptr, .ty = retType });
+        return;
+    }
 
     const funcType = core.LLVMGlobalGetValueType(funcRef);
 
@@ -994,8 +1089,22 @@ fn generateCall(
             }
             args[i] = val;
         } else {
-            std.debug.print("warning: generateCall: missing local '{s}' for argument {d} of '{s}'\n", .{ argName, i, call.fnName });
-            return;
+            const argNameZ = try allocator.dupeZ(u8, argName);
+            defer allocator.free(argNameZ);
+            const argFuncRef = core.LLVMGetNamedFunction(module, argNameZ.ptr);
+            if (argFuncRef != null and i < expectedParamCount) {
+                const expectedType = expectedParamTypes[i];
+                const funcVal = argFuncRef.?;
+                args[i] = if (core.LLVMGetTypeKind(expectedType) == .LLVMPointerTypeKind)
+                    core.LLVMBuildBitCast(builder, funcVal, expectedType, "fnarg")
+                else if (core.LLVMGetTypeKind(expectedType) == .LLVMIntegerTypeKind)
+                    core.LLVMBuildPtrToInt(builder, funcVal, expectedType, "fnarg")
+                else
+                    funcVal;
+            } else {
+                std.debug.print("warning: generateCall: missing local '{s}' for argument {d} of '{s}'\n", .{ argName, i, call.fnName });
+                return;
+            }
         }
     }
 
@@ -1371,6 +1480,42 @@ fn generateFieldAccess(
     }
 }
 
+fn generateFieldStore(
+    builder: types.LLVMBuilderRef,
+    locals: *std.StringHashMap(LocalVar),
+    fs: ir.ZSIRFieldStore,
+) !void {
+    const local = locals.get(fs.subject) orelse return;
+    if (core.LLVMGetTypeKind(local.ty) != .LLVMStructTypeKind) return;
+
+    // Load current struct value
+    const structVal = core.LLVMBuildLoad2(builder, local.ty, local.ptr, "structval");
+
+    // Load new field value
+    const newFieldLocal = locals.get(fs.value) orelse return;
+    var newVal = core.LLVMBuildLoad2(builder, newFieldLocal.ty, newFieldLocal.ptr, "newfield");
+
+    // Coerce type if needed (mirrors generateStructInit)
+    const expectedType = core.LLVMStructGetTypeAtIndex(local.ty, fs.fieldIndex);
+    if (newFieldLocal.ty != expectedType) {
+        const srcKind = core.LLVMGetTypeKind(newFieldLocal.ty);
+        const dstKind = core.LLVMGetTypeKind(expectedType);
+        if (srcKind == .LLVMIntegerTypeKind and dstKind == .LLVMIntegerTypeKind) {
+            const srcWidth = core.LLVMGetIntTypeWidth(newFieldLocal.ty);
+            const dstWidth = core.LLVMGetIntTypeWidth(expectedType);
+            if (srcWidth < dstWidth) {
+                newVal = core.LLVMBuildSExt(builder, newVal, expectedType, "sext");
+            } else if (srcWidth > dstWidth) {
+                newVal = core.LLVMBuildTrunc(builder, newVal, expectedType, "trunc");
+            }
+        }
+    }
+
+    // Replace field at index → store modified struct back
+    const updated = core.LLVMBuildInsertValue(builder, structVal, newVal, fs.fieldIndex, "withfield");
+    _ = core.LLVMBuildStore(builder, updated, local.ptr);
+}
+
 fn generatePtrOp(
     builder: types.LLVMBuilderRef,
     locals: *std.StringHashMap(LocalVar),
@@ -1427,6 +1572,47 @@ fn generateDerefOp(
     const alloca = core.LLVMBuildAlloca(builder, pointeeType, "deref_result");
     _ = core.LLVMBuildStore(builder, loadedVal, alloca);
     try locals.put(op.resultName, LocalVar{ .ptr = alloca, .ty = pointeeType });
+}
+
+fn generateStorePtr(
+    builder: types.LLVMBuilderRef,
+    locals: *std.StringHashMap(LocalVar),
+    op: ir.ZSIRStorePtr,
+) !void {
+    const ptrLocal = locals.get(op.pointer) orelse return;
+    const valueLocal = locals.get(op.value) orelse return;
+    const i64Type = core.LLVMInt64Type();
+    const pointeeType = mapType(op.pointeeType);
+
+    // Load the i64-encoded pointer
+    const ptrInt = core.LLVMBuildLoad2(builder, i64Type, ptrLocal.ptr, "storeptr_ptrint");
+
+    // Convert i64 to a typed pointer
+    const typedPtr = core.LLVMBuildIntToPtr(
+        builder,
+        ptrInt,
+        core.LLVMPointerType(pointeeType, 0),
+        "storeptr_ptr",
+    );
+
+    // Load the value to store
+    var val = core.LLVMBuildLoad2(builder, valueLocal.ty, valueLocal.ptr, "storeptr_val");
+
+    // Coerce value type to match pointee type if needed
+    const valueKind = core.LLVMGetTypeKind(valueLocal.ty);
+    const targetKind = core.LLVMGetTypeKind(pointeeType);
+    if (targetKind == .LLVMIntegerTypeKind and valueKind == .LLVMIntegerTypeKind) {
+        const tw = core.LLVMGetIntTypeWidth(pointeeType);
+        const vw = core.LLVMGetIntTypeWidth(valueLocal.ty);
+        if (vw < tw) {
+            val = core.LLVMBuildSExt(builder, val, pointeeType, "storeptr_ext");
+        } else if (vw > tw) {
+            val = core.LLVMBuildTrunc(builder, val, pointeeType, "storeptr_trunc");
+        }
+    }
+
+    // Store through the pointer
+    _ = core.LLVMBuildStore(builder, val, typedPtr);
 }
 
 fn generateNot(
@@ -1495,6 +1681,17 @@ fn generateIndexAccess(
 
         // Stride-aware: if elemType is set, use typed element size
         if (ia.elemType) |et| {
+            if (isPointerTypeName(et)) {
+                const sum = core.LLVMBuildAdd(builder, addr, idx64, "ptradd");
+                const i8PtrType = core.LLVMPointerType(core.LLVMInt8Type(), 0);
+                const rawPtr = core.LLVMBuildIntToPtr(builder, sum, i8PtrType, "rawptr");
+                const i8Type = core.LLVMInt8Type();
+                const val = core.LLVMBuildLoad2(builder, i8Type, rawPtr, "byteval");
+                const resPtr = core.LLVMBuildAlloca(builder, i8Type, "idxres");
+                _ = core.LLVMBuildStore(builder, val, resPtr);
+                try locals.put(ia.resultName, LocalVar{ .ptr = resPtr, .ty = i8Type });
+                return;
+            }
             const llvmElemType = mapType(et);
             const elemSize: u64 = getTypeSizeBytes(llvmElemType);
             const offset = core.LLVMBuildMul(builder, idx64, core.LLVMConstInt(i64Type, elemSize, 0), "offset");
@@ -1535,6 +1732,51 @@ fn generateIndexAccess(
     }
 
     const arrType = subjectLocal.ty;
+    const arrKind = core.LLVMGetTypeKind(arrType);
+    if (arrKind != .LLVMArrayTypeKind) {
+        const subjectVal = core.LLVMBuildLoad2(builder, subjectLocal.ty, subjectLocal.ptr, "idxsubject");
+        const subjectValType = core.LLVMTypeOf(subjectVal);
+        const subjectValKind = core.LLVMGetTypeKind(subjectValType);
+
+        if (subjectValKind == .LLVMIntegerTypeKind) {
+            const subjectInt = if (subjectValType == i64Type)
+                subjectVal
+            else blk: {
+                const width = core.LLVMGetIntTypeWidth(subjectValType);
+                if (width < 64) break :blk core.LLVMBuildSExt(builder, subjectVal, i64Type, "addr64");
+                if (width > 64) break :blk core.LLVMBuildTrunc(builder, subjectVal, i64Type, "addr64");
+                break :blk subjectVal;
+            };
+            const idx64 = core.LLVMBuildSExt(builder, indexVal, i64Type, "idx64");
+            const fallbackToByte = if (ia.elemType) |et| isPointerTypeName(et) else false;
+            const llvmElemType = if (fallbackToByte) core.LLVMInt8Type() else if (ia.elemType) |et| mapType(et) else core.LLVMInt8Type();
+            const elemSize: u64 = getTypeSizeBytes(llvmElemType);
+            const offset = core.LLVMBuildMul(builder, idx64, core.LLVMConstInt(i64Type, elemSize, 0), "offset");
+            const sum = core.LLVMBuildAdd(builder, subjectInt, offset, "ptradd");
+            const typedPtrType = core.LLVMPointerType(llvmElemType, 0);
+            const typedPtr = core.LLVMBuildIntToPtr(builder, sum, typedPtrType, "typedptr");
+            const val = core.LLVMBuildLoad2(builder, llvmElemType, typedPtr, "typedval");
+            const resPtr = core.LLVMBuildAlloca(builder, llvmElemType, "idxres");
+            _ = core.LLVMBuildStore(builder, val, resPtr);
+            try locals.put(ia.resultName, LocalVar{ .ptr = resPtr, .ty = llvmElemType });
+            return;
+        }
+
+        if (subjectValKind == .LLVMPointerTypeKind) {
+            const idx64 = core.LLVMBuildSExt(builder, indexVal, i64Type, "idx64");
+            const llvmElemType = if (ia.elemType) |et| mapType(et) else core.LLVMInt8Type();
+            const gep = core.LLVMBuildGEP2(builder, llvmElemType, subjectVal, @constCast(&[_]types.LLVMValueRef{idx64}), 1, "idxgep");
+            const val = core.LLVMBuildLoad2(builder, llvmElemType, gep, "idxval");
+            const resPtr = core.LLVMBuildAlloca(builder, llvmElemType, "idxres");
+            _ = core.LLVMBuildStore(builder, val, resPtr);
+            try locals.put(ia.resultName, LocalVar{ .ptr = resPtr, .ty = llvmElemType });
+            return;
+        }
+
+        std.debug.print("Unsupported index access subject type kind: {any}\n", .{arrKind});
+        return;
+    }
+
     const elemType = core.LLVMGetElementType(arrType);
 
     var indices: [2]types.LLVMValueRef = .{
@@ -1568,6 +1810,21 @@ fn generateIndexStore(
 
         // Stride-aware: if elemType is set, use typed element size
         if (istor.elemType) |et| {
+            if (isPointerTypeName(et)) {
+                const sum = core.LLVMBuildAdd(builder, addr, idx64, "ptradd");
+                const i8PtrType = core.LLVMPointerType(core.LLVMInt8Type(), 0);
+                const rawPtr = core.LLVMBuildIntToPtr(builder, sum, i8PtrType, "rawptr");
+                var val = core.LLVMBuildLoad2(builder, valueLocal.ty, valueLocal.ptr, "stval");
+                const i8Type = core.LLVMInt8Type();
+                if (core.LLVMGetTypeKind(valueLocal.ty) == .LLVMIntegerTypeKind) {
+                    const valWidth = core.LLVMGetIntTypeWidth(valueLocal.ty);
+                    if (valWidth > 8) {
+                        val = core.LLVMBuildTrunc(builder, val, i8Type, "sttrunc");
+                    }
+                }
+                _ = core.LLVMBuildStore(builder, val, rawPtr);
+                return;
+            }
             const llvmElemType = mapType(et);
             const elemSize: u64 = getTypeSizeBytes(llvmElemType);
             const offset = core.LLVMBuildMul(builder, idx64, core.LLVMConstInt(i64Type, elemSize, 0), "offset");
@@ -1628,6 +1885,61 @@ fn generateIndexStore(
             }
         }
         _ = core.LLVMBuildStore(builder, val, gep);
+        return;
+    }
+
+    const subjectKind = core.LLVMGetTypeKind(subjectLocal.ty);
+    if (subjectKind != .LLVMArrayTypeKind) {
+        const subjectVal = core.LLVMBuildLoad2(builder, subjectLocal.ty, subjectLocal.ptr, "stsubject");
+        const subjectValType = core.LLVMTypeOf(subjectVal);
+        const subjectValKind = core.LLVMGetTypeKind(subjectValType);
+
+        if (subjectValKind == .LLVMIntegerTypeKind) {
+            const subjectInt = if (subjectValType == i64Type)
+                subjectVal
+            else blk: {
+                const width = core.LLVMGetIntTypeWidth(subjectValType);
+                if (width < 64) break :blk core.LLVMBuildSExt(builder, subjectVal, i64Type, "addr64");
+                if (width > 64) break :blk core.LLVMBuildTrunc(builder, subjectVal, i64Type, "addr64");
+                break :blk subjectVal;
+            };
+            const idx64 = core.LLVMBuildSExt(builder, indexVal, i64Type, "idx64");
+            const fallbackToByte = if (istor.elemType) |et| isPointerTypeName(et) else false;
+            const llvmElemType = if (fallbackToByte) core.LLVMInt8Type() else if (istor.elemType) |et| mapType(et) else core.LLVMInt8Type();
+            const elemSize: u64 = getTypeSizeBytes(llvmElemType);
+            const offset = core.LLVMBuildMul(builder, idx64, core.LLVMConstInt(i64Type, elemSize, 0), "offset");
+            const sum = core.LLVMBuildAdd(builder, subjectInt, offset, "ptradd");
+            const typedPtrType = core.LLVMPointerType(llvmElemType, 0);
+            const typedPtr = core.LLVMBuildIntToPtr(builder, sum, typedPtrType, "typedptr");
+            var val = core.LLVMBuildLoad2(builder, valueLocal.ty, valueLocal.ptr, "stval");
+            if (core.LLVMGetTypeKind(valueLocal.ty) == .LLVMIntegerTypeKind and
+                core.LLVMGetTypeKind(llvmElemType) == .LLVMIntegerTypeKind)
+            {
+                const srcw = core.LLVMGetIntTypeWidth(valueLocal.ty);
+                const dstw = core.LLVMGetIntTypeWidth(llvmElemType);
+                if (srcw < dstw) val = core.LLVMBuildSExt(builder, val, llvmElemType, "sext") else if (srcw > dstw) val = core.LLVMBuildTrunc(builder, val, llvmElemType, "trunc");
+            }
+            _ = core.LLVMBuildStore(builder, val, typedPtr);
+            return;
+        }
+
+        if (subjectValKind == .LLVMPointerTypeKind) {
+            const idx64 = core.LLVMBuildSExt(builder, indexVal, i64Type, "idx64");
+            const llvmElemType = if (istor.elemType) |et| mapType(et) else core.LLVMInt8Type();
+            const gep = core.LLVMBuildGEP2(builder, llvmElemType, subjectVal, @constCast(&[_]types.LLVMValueRef{idx64}), 1, "idxgep");
+            var val = core.LLVMBuildLoad2(builder, valueLocal.ty, valueLocal.ptr, "stval");
+            if (core.LLVMGetTypeKind(valueLocal.ty) == .LLVMIntegerTypeKind and
+                core.LLVMGetTypeKind(llvmElemType) == .LLVMIntegerTypeKind)
+            {
+                const srcw = core.LLVMGetIntTypeWidth(valueLocal.ty);
+                const dstw = core.LLVMGetIntTypeWidth(llvmElemType);
+                if (srcw < dstw) val = core.LLVMBuildSExt(builder, val, llvmElemType, "sext") else if (srcw > dstw) val = core.LLVMBuildTrunc(builder, val, llvmElemType, "trunc");
+            }
+            _ = core.LLVMBuildStore(builder, val, gep);
+            return;
+        }
+
+        std.debug.print("Unsupported index store subject type kind: {any}\n", .{subjectKind});
         return;
     }
 
@@ -1955,6 +2267,15 @@ fn getTypeSizeBytes(ty: types.LLVMTypeRef) u64 {
     return 1;
 }
 
+fn isPointerTypeName(name: []const u8) bool {
+    return std.mem.eql(u8, name, "pointer") or
+        std.mem.eql(u8, name, "Pointer") or
+        std.mem.startsWith(u8, name, "Pointer<") or
+        std.mem.startsWith(u8, name, "pointer<") or
+        std.mem.startsWith(u8, name, "Pointer__") or
+        std.mem.startsWith(u8, name, "pointer__");
+}
+
 fn mapType(name: []const u8) types.LLVMTypeRef {
     if (std.mem.eql(u8, name, "number") or std.mem.eql(u8, name, "int")) {
         return core.LLVMInt32Type();
@@ -1972,13 +2293,25 @@ fn mapType(name: []const u8) types.LLVMTypeRef {
         return getStringType();
     } else if (std.mem.eql(u8, name, "c_string")) {
         return core.LLVMPointerType(core.LLVMInt8Type(), 0);
-    } else if (std.mem.eql(u8, name, "pointer") or std.mem.eql(u8, name, "Pointer") or
-        std.mem.startsWith(u8, name, "Pointer<") or std.mem.startsWith(u8, name, "pointer<") or
-        std.mem.startsWith(u8, name, "Pointer__") or std.mem.startsWith(u8, name, "pointer__"))
-    {
+    } else if (isPointerTypeName(name)) {
         return core.LLVMInt64Type();
     } else if (std.mem.eql(u8, name, "void")) {
         return core.LLVMVoidType();
+    } else if (std.mem.eql(u8, name, "function")) {
+        // Opaque function pointer placeholder. The IR emits only the flat string "function"
+        // with no parameter/return type info, so we cannot construct a typed LLVMFunctionType
+        // here. A typed function pointer will be produced in Task 3 when structured type info
+        // is threaded through the IR layer. For now, use i8* (matching the existing fallback
+        // convention used elsewhere in this file).
+        return core.LLVMPointerType(core.LLVMInt8Type(), 0);
+    } else if (std.mem.eql(u8, name, "unit") or std.mem.eql(u8, name, "Unit")) {
+        // Unit is a zero-sized type. We represent it as an empty struct rather than
+        // LLVMVoidType because void cannot be alloca'd or stored in struct fields (e.g.
+        // as the payload of Either.Left(Unit)). Either.Left(Unit) is represented with
+        // discriminant = 0 and a zero-sized payload — the discriminant alone carries the
+        // information; the Unit field occupies zero bytes in the enum layout.
+        var fields: [0]types.LLVMTypeRef = .{};
+        return core.LLVMStructType(&fields, 0, 0);
     } else {
         // Check struct type registry
         if (structTypeRegistryInitialized) {

@@ -3,6 +3,7 @@ package org.chisa.intellij.completion
 import com.intellij.codeInsight.completion.*
 import com.intellij.codeInsight.lookup.LookupElementBuilder
 import com.intellij.lang.ASTNode
+import com.intellij.lang.injection.InjectedLanguageManager
 import com.intellij.openapi.command.WriteCommandAction
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.patterns.PlatformPatterns
@@ -52,10 +53,12 @@ class ChisaCompletionContributor : CompletionContributor() {
             context: ProcessingContext,
             result: CompletionResultSet
         ) {
+            if (InjectedLanguageManager.getInstance(parameters.position.project)
+                    .isInjectedFragment(parameters.originalFile)) return
             val position = parameters.position
             val parent = position.parent
             val originalFile = parameters.originalFile as? ChisaFile
-            LOG.warn("Chisa completion: position=${position::class.simpleName}, parent=${parent::class.simpleName}(${parent.node.elementType})")
+            LOG.debug("Chisa completion: position=${position::class.simpleName}, parent=${parent::class.simpleName}(${parent.node.elementType})")
 
             when {
                 // 4c. Dot-access completion (member access)
@@ -284,7 +287,7 @@ class ChisaCompletionContributor : CompletionContributor() {
                 .mapNotNullTo(HashSet()) { it.name }
 
             val projectSymbols = ChisaResolveUtil.collectProjectExportedSymbols(file, inScope)
-            LOG.warn("Chisa project completion: projectSymbols count = ${projectSymbols.size}")
+            LOG.debug("Chisa project completion: projectSymbols count = ${projectSymbols.size}")
 
             for ((element, path) in projectSymbols) {
                 if (typesOnly && element !is ChisaStructDeclaration && element !is ChisaEnumDeclaration) continue
@@ -358,6 +361,7 @@ class ChisaCompletionContributor : CompletionContributor() {
 
         private fun addDaemonCompletions(parameters: CompletionParameters, result: CompletionResultSet) {
             val file = parameters.originalFile
+            if (InjectedLanguageManager.getInstance(file.project).isInjectedFragment(file)) return
             val path = file.virtualFile?.path ?: return
             val content = file.text ?: return
             val offset = parameters.offset

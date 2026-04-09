@@ -1,0 +1,12 @@
+import { Option } from "../../stdlib/Option.chisa"
+
+fn transform<T, U>(value: T, f: (T) -> U): U = f(value)
+
+fn wrapTransform<T, U>(value: T, f: (T) -> U): Option<U> = Option.Some(f(value))
+
+let a = transform(21) { x -> x * 2 }
+let b = wrapTransform(10) { x -> x + 5 }
+let c = b.getOrElse(0)
+
+print(a)
+print(c)

@@ -193,7 +193,9 @@ pub fn analyzeFieldAccess(self: anytype, fa: ast.expr.ZSFieldAccess) Error!Symbo
                 if (std.mem.eql(u8, variant.name, fa.field)) {
                     // For generic enums, try to use expected type to instantiate
                     if (ed.type_params.len > 0) {
-                        if (self.expectedType) |expected| {
+                        // Try expectedType first, then currentFnReturnType as fallback
+                        const contextType: ?Symbol.ZSTypeNotation = self.expectedType orelse self.currentFnReturnType;
+                        if (contextType) |expected| {
                             if (expected == .enum_type) {
                                 const expectedEnum = expected.enum_type;
                                 if (std.mem.eql(u8, expectedEnum.name, ed.name) and expectedEnum.type_args.len == ed.type_params.len) {
@@ -252,10 +254,41 @@ pub fn analyzeFieldAccess(self: anytype, fa: ast.expr.ZSFieldAccess) Error!Symbo
 }
 
 pub fn analyzeEnumInit(self: anytype, ei: ast.expr.ZSEnumInit) Error!Symbol.ZSTypeNotation {
-    const ed = self.enumDefs.get(ei.enum_name) orelse {
+    // The parser emits enum_init for both `EnumName.Variant(payload)` and
+    // `variable.method(arg)` since it can't distinguish at parse time.
+    // When enum_name is not an enum, re-interpret as a method call on a variable.
+    if (!self.enumDefs.contains(ei.enum_name)) {
+        if (self.tableStack.get(ei.enum_name)) |_| {
+            // Reinterpret as: variable.method(arg) using stack-local AST nodes.
+            // analyzeCall is called synchronously so stack pointers remain valid.
+            var subjectRef = ast.expr.ZSExpr{ .reference = .{
+                .name = ei.enum_name,
+                .startPos = ei.startPos,
+                .endPos = ei.startPos + ei.enum_name.len,
+            } };
+            var fieldAccess = ast.expr.ZSExpr{ .field_access = .{
+                .subject = &subjectRef,
+                .field = ei.variant_name,
+                .startPos = ei.startPos,
+                .endPos = ei.endPos,
+            } };
+            var oneArg: [1]ast.expr.ZSExpr = undefined;
+            const args: []ast.expr.ZSExpr = if (ei.payload) |p| blk: {
+                oneArg[0] = p.*;
+                break :blk oneArg[0..1];
+            } else &.{};
+            const callExpr = ast.expr.ZSCall{
+                .subject = &fieldAccess,
+                .arguments = args,
+                .startPos = ei.startPos,
+                .endPos = ei.endPos,
+            };
+            return self.analyzeCall(callExpr);
+        }
         try self.recordError(ei, "Unknown enum type");
         return Symbol.ZSTypeNotation.unknown;
-    };
+    }
+    const ed = self.enumDefs.get(ei.enum_name).?;
 
     // Find the variant
     var foundVariant: ?ast.stmt.ZSEnum.ZSEnumVariant = null;
@@ -295,11 +328,11 @@ pub fn analyzeEnumInit(self: anytype, ei: ast.expr.ZSEnumInit) Error!Symbol.ZSTy
         }
 
         if (variant.payload_type != null and ei.payload != null) {
-            const ptName = variant.payload_type.?.typeName();
+            const payloadAstType = variant.payload_type.?;
             for (ed.type_params, 0..) |param, pi| {
-                if (std.mem.eql(u8, ptName, param)) {
-                    inferredTypeArgs[pi] = payloadType;
-                    break;
+                if (inferredTypeArgs[pi] == .unknown) {
+                    const inferred = inferTypeParamResolved(payloadAstType, payloadType, param);
+                    if (inferred != .unknown) inferredTypeArgs[pi] = inferred;
                 }
             }
         }
@@ -536,4 +569,50 @@ pub fn analyzeUse(self: anytype, u: ast.ZSUse) Error!void {
             .variant_name = variantName,
         });
     }
+}
+
+/// Recursively match a declared payload type annotation against a resolved type to extract
+/// the binding for a single type parameter. Returns `.unknown` when no match is found.
+fn inferTypeParamResolved(
+    declType: ast.ZSTypeNotation,
+    actualType: Symbol.ZSTypeNotation,
+    paramName: []const u8,
+) Symbol.ZSTypeNotation {
+    switch (declType) {
+        .reference => |ref| {
+            if (std.mem.eql(u8, ref, paramName)) return actualType;
+        },
+        .generic => |g| {
+            switch (actualType) {
+                .enum_type => |et| {
+                    if (std.mem.eql(u8, et.name, g.name)) {
+                        for (g.type_args, 0..) |ta, i| {
+                            if (i < et.type_args.len) {
+                                const r = inferTypeParamResolved(ta, et.type_args[i], paramName);
+                                if (r != .unknown) return r;
+                            }
+                        }
+                    }
+                },
+                .struct_type => |st| {
+                    if (std.mem.eql(u8, st.name, g.name)) {
+                        for (g.type_args, 0..) |ta, i| {
+                            if (i < st.type_args.len) {
+                                const r = inferTypeParamResolved(ta, st.type_args[i], paramName);
+                                if (r != .unknown) return r;
+                            }
+                        }
+                    }
+                },
+                else => {},
+            }
+        },
+        .array => |elem| {
+            if (actualType == .array_type) {
+                return inferTypeParamResolved(elem.element_type.*, actualType.array_type.element_type.*, paramName);
+            }
+        },
+        .fn_type => {},
+    }
+    return .unknown;
 }

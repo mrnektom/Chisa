@@ -30,6 +30,7 @@ allocatedStructFields: std.ArrayList([]sig.ZSStructField),
 allocatedFnArgs: std.ArrayList([]sig.ZSFnArg),
 allocatedTypeSlices: std.ArrayList([]const Symbol.ZSTypeNotation),
 allocatedAstTypeSlices: std.ArrayList([]const ast.type_notation.ZSTypeNotation),
+allocatedAstTypes: std.ArrayList(*ast.type_notation.ZSTypeNotation),
 allocatedAstStructFields: std.ArrayList([]const ast.stmt.ZSStruct.ZSStructField),
 scalarDefs: std.StringHashMap(Symbol.ZSTypeNotation),
 structDefs: std.StringHashMap(StructDef),
@@ -50,9 +51,12 @@ structInitResolutions: std.AutoHashMap(usize, []const u8),
 monomorphizedEnums: std.StringHashMap(MonomorphizedEnumDef),
 matchEnumNames: std.AutoHashMap(usize, []const u8),
 typeParamBindings: ?TypeParamBindings,
+typeParamSymbolBindings: ?TypeParamSymbolBindings,
 extensionFns: std.StringHashMap(std.ArrayList(OverloadEntry)),
 extensionCalls: std.AutoHashMap(usize, void),
 lambdaNames: std.AutoHashMap(usize, []const u8),
+lambdaTypes: std.AutoHashMap(usize, sig.ZSType),
+safeNavInfo: std.AutoHashMap(usize, SafeNavInfo),
 lambdaCount: usize,
 typeResolutionDepth: u32,
 inLoop: bool,
@@ -63,6 +67,13 @@ currentFnReturnType: ?Symbol.ZSTypeNotation = null,
 pub const EnumInitInfo = struct {
     enumName: []const u8,
     variantTag: u32,
+};
+
+pub const SafeNavInfo = struct {
+    isFlatMap: bool,
+    receiverEnumName: []const u8,
+    resultEnumName: []const u8,
+    fieldIndex: u32,
 };
 
 const UseAlias = struct {
@@ -90,6 +101,11 @@ pub const MonomorphizedEnumDef = struct {
 pub const TypeParamBindings = struct {
     typeParams: []const []const u8,
     bindings: []const []const u8,
+};
+
+pub const TypeParamSymbolBindings = struct {
+    typeParams: []const []const u8,
+    bindings: []const Symbol.ZSTypeNotation,
 };
 
 pub const GenericFnDef = struct {
@@ -126,6 +142,7 @@ pub const AnalyzeResult = struct {
     allocatedFnArgs: std.ArrayList([]sig.ZSFnArg),
     allocatedTypeSlices: std.ArrayList([]const Symbol.ZSTypeNotation),
     allocatedAstTypeSlices: std.ArrayList([]const ast.type_notation.ZSTypeNotation),
+    allocatedAstTypes: std.ArrayList(*ast.type_notation.ZSTypeNotation),
     allocatedAstStructFields: std.ArrayList([]const ast.stmt.ZSStruct.ZSStructField),
     scalarDefs: std.StringHashMap(Symbol.ZSTypeNotation),
     structDefs: std.StringHashMap(StructDef),
@@ -146,6 +163,8 @@ pub const AnalyzeResult = struct {
     extensionFns: std.StringHashMap(std.ArrayList(OverloadEntry)),
     extensionCalls: std.AutoHashMap(usize, void),
     lambdaNames: std.AutoHashMap(usize, []const u8),
+    lambdaTypes: std.AutoHashMap(usize, sig.ZSType),
+    safeNavInfo: std.AutoHashMap(usize, SafeNavInfo),
     typeAliases: std.StringHashMap(TypeAliasDef),
 
     pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
@@ -206,6 +225,12 @@ pub const AnalyzeResult = struct {
         }
         self.allocatedAstTypeSlices.deinit(allocator);
 
+        // Free all tracked single AST type pointer allocations
+        for (self.allocatedAstTypes.items) |p| {
+            allocator.destroy(p);
+        }
+        self.allocatedAstTypes.deinit(allocator);
+
         // Free all tracked AST struct field slices
         for (self.allocatedAstStructFields.items) |s| {
             allocator.free(s);
@@ -242,6 +267,8 @@ pub const AnalyzeResult = struct {
         self.extensionFns.deinit();
         self.extensionCalls.deinit();
         self.lambdaNames.deinit();
+        self.lambdaTypes.deinit();
+        self.safeNavInfo.deinit();
         self.typeAliases.deinit();
     }
 };
@@ -272,6 +299,7 @@ pub fn analyzeWithPrelude(module: zsm.ZSModule, allocator: std.mem.Allocator, de
         .allocatedFnArgs = try std.ArrayList([]sig.ZSFnArg).initCapacity(allocator, 4),
         .allocatedTypeSlices = try std.ArrayList([]const Symbol.ZSTypeNotation).initCapacity(allocator, 4),
         .allocatedAstTypeSlices = try std.ArrayList([]const ast.type_notation.ZSTypeNotation).initCapacity(allocator, 4),
+        .allocatedAstTypes = try std.ArrayList(*ast.type_notation.ZSTypeNotation).initCapacity(allocator, 4),
         .allocatedAstStructFields = try std.ArrayList([]const ast.stmt.ZSStruct.ZSStructField).initCapacity(allocator, 4),
         .scalarDefs = std.StringHashMap(Symbol.ZSTypeNotation).init(allocator),
         .structDefs = std.StringHashMap(StructDef).init(allocator),
@@ -292,9 +320,12 @@ pub fn analyzeWithPrelude(module: zsm.ZSModule, allocator: std.mem.Allocator, de
         .monomorphizedEnums = std.StringHashMap(MonomorphizedEnumDef).init(allocator),
         .matchEnumNames = std.AutoHashMap(usize, []const u8).init(allocator),
         .typeParamBindings = null,
+        .typeParamSymbolBindings = null,
         .extensionFns = std.StringHashMap(std.ArrayList(OverloadEntry)).init(allocator),
         .extensionCalls = std.AutoHashMap(usize, void).init(allocator),
         .lambdaNames = std.AutoHashMap(usize, []const u8).init(allocator),
+        .lambdaTypes = std.AutoHashMap(usize, sig.ZSType).init(allocator),
+        .safeNavInfo = std.AutoHashMap(usize, SafeNavInfo).init(allocator),
         .lambdaCount = 0,
         .typeResolutionDepth = 0,
         .inLoop = false,
@@ -360,6 +391,7 @@ pub fn analyzeWithPrelude(module: zsm.ZSModule, allocator: std.mem.Allocator, de
         .allocatedFnArgs = analyzer.allocatedFnArgs,
         .allocatedTypeSlices = analyzer.allocatedTypeSlices,
         .allocatedAstTypeSlices = analyzer.allocatedAstTypeSlices,
+        .allocatedAstTypes = analyzer.allocatedAstTypes,
         .allocatedAstStructFields = analyzer.allocatedAstStructFields,
         .scalarDefs = analyzer.scalarDefs,
         .structDefs = analyzer.structDefs,
@@ -380,6 +412,8 @@ pub fn analyzeWithPrelude(module: zsm.ZSModule, allocator: std.mem.Allocator, de
         .extensionFns = analyzer.extensionFns,
         .extensionCalls = analyzer.extensionCalls,
         .lambdaNames = analyzer.lambdaNames,
+        .lambdaTypes = analyzer.lambdaTypes,
+        .safeNavInfo = analyzer.safeNavInfo,
         .typeAliases = analyzer.typeAliases,
     };
 }
@@ -421,7 +455,11 @@ pub fn analyzeStmt(self: *Self, stmt: ast.stmt.ZSStmt) !?Symbol {
 }
 
 pub fn analyzeExpr(self: *Self, expr: ast.expr.ZSExpr) !Symbol.ZSTypeNotation {
-    return expr_analyzer.analyzeExpr(self, expr);
+    const result = try expr_analyzer.analyzeExpr(self, expr);
+    if (result == .unknown and shouldReportUnknownExpr(expr)) {
+        try self.recordErrorAt(expr.start(), expr.end(), "Expression type could not be resolved");
+    }
+    return result;
 }
 
 pub fn analyzeLambda(self: *Self, lambda: ast.expr.ZSLambda) Error!Symbol.ZSTypeNotation {
@@ -443,7 +481,6 @@ pub fn analyzeReassignFieldTarget(self: *Self, f: ast.stmt.ZSReassign.FieldTarge
 pub fn analyzeFunction(self: *Self, function: ast.stmt.ZSFn) !Symbol {
     return stmt_analyzer.analyzeFunction(self, function);
 }
-
 
 pub fn analyzeBuiltin(self: *Self, builtin: ast.ZSBuiltin) !Symbol.ZSTypeNotation {
     return call_analyzer.analyzeBuiltin(self, builtin);
@@ -484,7 +521,6 @@ pub fn analyzeContinue(self: *Self, continueExpr: ast.expr.ZSContinue) Error!Sym
 pub fn analyzeUnary(self: *Self, unary: ast.expr.ZSUnary) Error!Symbol.ZSTypeNotation {
     return expr_analyzer.analyzeUnary(self, unary);
 }
-
 
 pub fn analyzeBinary(self: *Self, binary: ast.expr.ZSBinary) Error!Symbol.ZSTypeNotation {
     return expr_analyzer.analyzeBinary(self, binary);
@@ -582,6 +618,10 @@ pub fn resolveConcreteRetType(self: *Self, gfn: GenericFnDef, bindings: []const 
     return type_resolver.resolveConcreteRetType(self, gfn, bindings);
 }
 
+pub fn resolveConcreteRetTypeWithSymbolBindings(self: *Self, gfn: GenericFnDef, bindings: []const Symbol.ZSTypeNotation) Error!Symbol.ZSTypeNotation {
+    return type_resolver.resolveConcreteRetTypeWithSymbolBindings(self, gfn, bindings);
+}
+
 pub fn monomorphizeFunction(self: *Self, gfn: GenericFnDef, bindings: []const []const u8, mangledName: []const u8) !ast.stmt.ZSFn {
     return call_analyzer.monomorphizeFunction(self, gfn, bindings, mangledName);
 }
@@ -607,6 +647,10 @@ pub fn safeSourceOffset(self: *Self, ptr: [*]const u8) usize {
 
 pub fn substituteTypeParamName(self: *Self, name: []const u8) []const u8 {
     return type_resolver.substituteTypeParamName(self, name);
+}
+
+pub fn typeToBindingString(self: *Self, t: Symbol.ZSTypeNotation) ![]const u8 {
+    return type_resolver.typeToBindingString(self, t);
 }
 
 pub fn recordError(
@@ -635,4 +679,11 @@ pub fn recordErrorAt(
         .lineNumber = root.SourceHelpers.computeLineNumber(self.module.source, start),
         .lineCol = root.SourceHelpers.computeLineOffset(self.module.source, start),
     });
+}
+
+fn shouldReportUnknownExpr(expr: ast.expr.ZSExpr) bool {
+    return switch (expr) {
+        .while_expr, .for_expr, .break_expr, .continue_expr, .return_expr, .block => false,
+        else => true,
+    };
 }

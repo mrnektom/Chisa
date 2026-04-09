@@ -1,5 +1,6 @@
 import { Either } from "./Either.chisa"
-import { free } from "./mem.chisa"
+import { alloc, free } from "./mem.chisa"
+import { String, strConcat, toCstr } from "./String.chisa"
 
 export const O_RDONLY = 0
 export const O_WRONLY = 1
@@ -20,6 +21,14 @@ export enum FsError {
   BadFd,
   NoSpace,
   IoError,
+}
+
+export fn FsError.toString(): String = match this {
+    FsError.NotFound -> "NotFound"
+    FsError.PermissionDenied -> "PermissionDenied"
+    FsError.BadFd -> "BadFd"
+    FsError.NoSpace -> "NoSpace"
+    FsError.IoError -> "IoError"
 }
 
 fn writeFd(fd: number, s: String): number {
@@ -54,7 +63,7 @@ fn errnoToFsError(errno: number): FsError = match errno {
   else -> FsError.IoError
 }
 
-export fn open(path: String, flags: number, mode: number): Either<FsError, number> {
+fn openFd(path: String, flags: number, mode: number): number {
   let cpath = toCstr(path)
   asm {
     in rax = 2
@@ -65,6 +74,11 @@ export fn open(path: String, flags: number, mode: number): Either<FsError, numbe
     "syscall"
   }
   free(cpath, path.len + 1)
+  return fd
+}
+
+export fn open(path: String, flags: number, mode: number): Either<FsError, number> {
+  let fd = openFd(path, flags, mode)
   if (fd < 0) {
     return Either.Left(errnoToFsError(0 - fd))
   }
@@ -104,7 +118,10 @@ export fn readFd(fd: number, buf: Pointer<char>, count: number): number {
 }
 
 export fn readFile(path: String): Either<FsError, String> {
-  let fd = open(path, O_RDONLY, 0)!!
+  let fd = openFd(path, 0, 0)
+  if (fd < 0) {
+    return Either.Left(errnoToFsError(0 - fd))
+  }
   let cap = 65536
   let buf: Pointer<char> = alloc(cap)
   let bytes = readFd(fd, buf, cap)
@@ -117,7 +134,10 @@ export fn readFile(path: String): Either<FsError, String> {
 }
 
 export fn writeFile(path: String, content: String): Either<FsError, number> {
-  let fd = open(path, O_WRITE_NEW, MODE_DEFAULT)!!
+  let fd = openFd(path, O_WRITE_NEW, MODE_DEFAULT)
+  if (fd < 0) {
+    return Either.Left(errnoToFsError(0 - fd))
+  }
   let written = writeFd(fd, content)
   close(fd)
   if (written < 0) {
@@ -128,14 +148,14 @@ export fn writeFile(path: String, content: String): Either<FsError, number> {
 
 
 export fn print(s: String): void {
-  const msg: String = strConcat(s, "\n")
-  writeFd(1, buf)
-  free(msg.data, msg.len)
+  writeFd(1, s)
+  writeFd(1, "\n")
 }
 
 export fn print(n: number): void {
   let s = numberToString(n)
-  print(s)
+  writeFd(1, s)
+  writeFd(1, "\n")
   free(s.data, s.len)
 }
 
@@ -151,4 +171,3 @@ export fn readLine(): String {
 
   return String { len: bytes, data: ptr(buf) }
 }
-

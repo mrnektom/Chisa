@@ -3,12 +3,21 @@ package org.chisa.intellij.parser
 import com.intellij.lang.ASTNode
 import com.intellij.lang.PsiBuilder
 import com.intellij.lang.PsiParser
+import com.intellij.psi.impl.source.resolve.FileContextUtil
 import com.intellij.psi.tree.IElementType
+import org.chisa.intellij.ChisaFile
 import org.chisa.intellij.psi.ChisaElementTypes
 import org.chisa.intellij.psi.ChisaTokenTypes
 
 class ChisaParser : PsiParser {
     override fun parse(root: IElementType, builder: PsiBuilder): ASTNode {
+        val containingFile = builder.getUserData(FileContextUtil.CONTAINING_FILE_KEY)
+        if (containingFile != null && containingFile !is ChisaFile) {
+            val m = builder.mark()
+            while (!builder.eof()) builder.advanceLexer()
+            m.done(root)
+            return builder.treeBuilt
+        }
         val rootMarker = builder.mark()
         while (!builder.eof()) {
             val before = builder.currentOffset
@@ -39,6 +48,7 @@ class ChisaParser : PsiParser {
                     if (!b.eof()) parseTopLevel(b)
                 }
             }
+
             ChisaTokenTypes.IF -> parseIfStatement(b)
             ChisaTokenTypes.WHILE -> parseWhileStatement(b)
             ChisaTokenTypes.FOR -> parseForStatement(b)
@@ -47,6 +57,7 @@ class ChisaParser : PsiParser {
                 b.advanceLexer()
                 eatOptionalSemicolon(b)
             }
+
             ChisaTokenTypes.IMPORT -> parseImportStatement(b)
             ChisaTokenTypes.USE -> parseUseStatement(b)
             ChisaTokenTypes.AT -> parseAtTarget(b)
@@ -55,6 +66,8 @@ class ChisaParser : PsiParser {
             ChisaTokenTypes.ASM -> parseAsmStatement(b)
             ChisaTokenTypes.IDENTIFIER,
             ChisaTokenTypes.THIS_KW -> parseExpressionStatement(b)
+            ChisaTokenTypes.MATCH -> parseMatchExpression(b)
+
             else -> {
                 b.error("Unexpected token: ${b.tokenType}")
                 b.advanceLexer()
@@ -74,6 +87,7 @@ class ChisaParser : PsiParser {
                 b.advanceLexer()
                 eatOptionalSemicolon(b)
             }
+
             ChisaTokenTypes.WHEN -> parseWhenExpression(b)
             ChisaTokenTypes.ASM -> parseAsmStatement(b)
             ChisaTokenTypes.LBRACE -> parseBlock(b)
@@ -299,6 +313,7 @@ class ChisaParser : PsiParser {
                     b.error("Expected '->' in function type")
                 }
             }
+
             b.tokenType == ChisaTokenTypes.IDENTIFIER -> {
                 b.advanceLexer()
                 // Optional generic args <T, U>
@@ -315,6 +330,7 @@ class ChisaParser : PsiParser {
                     }
                 }
             }
+
             else -> {
                 b.error("Expected type name")
                 marker.drop()
@@ -608,9 +624,11 @@ class ChisaParser : PsiParser {
         ChisaTokenTypes.EQ_EQ, ChisaTokenTypes.BANG_EQ -> 2
         ChisaTokenTypes.LT, ChisaTokenTypes.GT,
         ChisaTokenTypes.LT_EQ, ChisaTokenTypes.GT_EQ -> 3
+
         ChisaTokenTypes.PLUS, ChisaTokenTypes.MINUS -> 4
         ChisaTokenTypes.STAR, ChisaTokenTypes.SLASH,
         ChisaTokenTypes.PERCENT -> 5
+
         else -> null
     }
 
@@ -631,6 +649,7 @@ class ChisaParser : PsiParser {
                 marker.done(ChisaElementTypes.REFERENCE_EXPRESSION)
                 parseSuffix(b, allowStructLit)
             }
+
             ChisaTokenTypes.NUMBER_LITERAL,
             ChisaTokenTypes.STRING_LITERAL,
             ChisaTokenTypes.CHAR_LITERAL,
@@ -638,25 +657,32 @@ class ChisaParser : PsiParser {
             ChisaTokenTypes.FALSE -> {
                 b.advanceLexer()
             }
+
             ChisaTokenTypes.LPAREN -> {
                 skipParenContent(b)
             }
+
             ChisaTokenTypes.LBRACKET -> {
                 parseArrayLiteral(b)
             }
+
             ChisaTokenTypes.LBRACE -> {
                 if (isLambdaStart(b)) parseLambdaExpression(b) else parseBlock(b)
             }
+
             ChisaTokenTypes.MATCH -> {
                 parseMatchExpression(b)
             }
+
             ChisaTokenTypes.WHEN -> {
                 parseWhenExpression(b)
             }
+
             ChisaTokenTypes.IF -> {
                 // inline if expression — delegate to if statement parsing
                 parseIfStatement(b)
             }
+
             else -> {
                 // Don't advance — caller handles this
             }
@@ -670,6 +696,7 @@ class ChisaParser : PsiParser {
                     // Function call
                     skipParenContent(b)
                 }
+
                 ChisaTokenTypes.DOT -> {
                     b.advanceLexer() // eat .
                     if (b.tokenType == ChisaTokenTypes.IDENTIFIER) {
@@ -678,13 +705,16 @@ class ChisaParser : PsiParser {
                         marker.done(ChisaElementTypes.REFERENCE_EXPRESSION)
                     }
                 }
+
                 ChisaTokenTypes.LBRACKET -> {
                     skipBracketContent(b)
                 }
+
                 ChisaTokenTypes.LBRACE -> {
                     // Struct literal: Name { field: value, ... }
                     if (allowStructLit) parseStructLiteralBody(b) else break
                 }
+
                 ChisaTokenTypes.LT -> {
                     // Generic struct literal: Name<T, U> { field: value, ... }
                     // Speculatively skip generic args; if followed by '{' it's a struct literal.
@@ -698,6 +728,7 @@ class ChisaParser : PsiParser {
                         break
                     }
                 }
+
                 ChisaTokenTypes.QUEST_DOT -> {
                     val safeMarker = b.mark()
                     b.advanceLexer() // eat ?.
@@ -708,11 +739,13 @@ class ChisaParser : PsiParser {
                     }
                     safeMarker.done(ChisaElementTypes.SAFE_NAVIGATION)
                 }
+
                 ChisaTokenTypes.BANG_BANG -> {
                     val errMarker = b.mark()
                     b.advanceLexer() // eat !!
                     errMarker.done(ChisaElementTypes.ERROR_PROPAGATION)
                 }
+
                 else -> break
             }
         }
@@ -750,6 +783,7 @@ class ChisaParser : PsiParser {
         if (b.tokenType == ChisaTokenTypes.LBRACE) {
             b.advanceLexer() // eat {
             while (!b.eof() && b.tokenType != ChisaTokenTypes.RBRACE) {
+                val before = b.currentOffset
                 val armMarker = b.mark()
                 parseMatchPattern(b)
                 if (b.tokenType == ChisaTokenTypes.ARROW) {
@@ -760,6 +794,8 @@ class ChisaParser : PsiParser {
                 }
                 if (b.tokenType == ChisaTokenTypes.COMMA) b.advanceLexer()
                 armMarker.done(ChisaElementTypes.MATCH_ARM)
+                // Guard against infinite loop on unexpected tokens
+                if (b.currentOffset == before) b.advanceLexer()
             }
             if (b.tokenType == ChisaTokenTypes.RBRACE) b.advanceLexer()
         }
@@ -774,6 +810,7 @@ class ChisaParser : PsiParser {
             ChisaTokenTypes.CHAR_LITERAL,
             ChisaTokenTypes.TRUE,
             ChisaTokenTypes.FALSE -> b.advanceLexer()
+
             ChisaTokenTypes.IDENTIFIER -> {
                 val nameMarker = b.mark()
                 b.advanceLexer() // eat name
@@ -791,17 +828,20 @@ class ChisaParser : PsiParser {
                             parseEnumPayloadPattern(b)
                         }
                     }
+
                     ChisaTokenTypes.LBRACE -> {
                         // StructName { field: val, field2 }
                         nameMarker.done(ChisaElementTypes.REFERENCE_EXPRESSION)
                         parseStructPatternBody(b)
                     }
+
                     else -> {
                         // Plain binding identifier — binds the matched value to a variable
                         nameMarker.done(ChisaElementTypes.MATCH_BINDING)
                     }
                 }
             }
+
             else -> {
                 b.error("Expected match pattern")
                 b.advanceLexer()
@@ -1043,7 +1083,10 @@ class ChisaParser : PsiParser {
                     }
                 }
                 when (b.tokenType) {
-                    ChisaTokenTypes.ARROW -> { found = true; break@loop }
+                    ChisaTokenTypes.ARROW -> {
+                        found = true; break@loop
+                    }
+
                     ChisaTokenTypes.COMMA -> b.advanceLexer()
                     else -> break@loop
                 }
@@ -1090,6 +1133,7 @@ class ChisaParser : PsiParser {
         if (b.tokenType == ChisaTokenTypes.LBRACE) {
             b.advanceLexer() // eat {
             while (!b.eof() && b.tokenType != ChisaTokenTypes.RBRACE) {
+                val before = b.currentOffset
                 val armMarker = b.mark()
                 // condition or else
                 if (b.tokenType == ChisaTokenTypes.ELSE) {
@@ -1101,7 +1145,8 @@ class ChisaParser : PsiParser {
                     b.advanceLexer() // eat ->
                     // arm body: declaration or expression
                     if (!b.eof() && b.tokenType != ChisaTokenTypes.RBRACE &&
-                        b.tokenType != ChisaTokenTypes.COMMA) {
+                        b.tokenType != ChisaTokenTypes.COMMA
+                    ) {
                         parseStatement(b)
                     }
                 } else {
@@ -1109,6 +1154,8 @@ class ChisaParser : PsiParser {
                 }
                 if (b.tokenType == ChisaTokenTypes.COMMA) b.advanceLexer()
                 armMarker.done(ChisaElementTypes.WHEN_ARM)
+                // Guard against infinite loop on unexpected tokens
+                if (b.currentOffset == before) b.advanceLexer()
             }
             if (b.tokenType == ChisaTokenTypes.RBRACE) b.advanceLexer()
         }
@@ -1130,6 +1177,7 @@ class ChisaParser : PsiParser {
                         parseExpression(b)
                         bm.done(ChisaElementTypes.ASM_BINDING)
                     }
+
                     ChisaTokenTypes.OUT_KW -> {
                         val bm = b.mark()
                         b.advanceLexer() // eat out
@@ -1142,6 +1190,7 @@ class ChisaParser : PsiParser {
                         }
                         bm.done(ChisaElementTypes.ASM_BINDING)
                     }
+
                     ChisaTokenTypes.CLOBBER_KW -> {
                         val bm = b.mark()
                         b.advanceLexer() // eat clobber
@@ -1151,9 +1200,11 @@ class ChisaParser : PsiParser {
                         }
                         bm.done(ChisaElementTypes.ASM_BINDING)
                     }
+
                     ChisaTokenTypes.STRING_LITERAL -> {
                         b.advanceLexer() // assembly instruction string
                     }
+
                     else -> {
                         b.error("Unexpected token in asm block")
                         b.advanceLexer()

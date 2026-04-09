@@ -192,12 +192,29 @@ pub fn registerFunctions(self: anytype, module: zsm.ZSModule) Error!void {
 }
 
 pub fn registerFunction(self: anytype, func: ast.stmt.ZSFn) Error!void {
-    // If the function has type parameters, store as a generic template
-    if (func.type_params.len > 0) {
-        try self.genericFns.put(func.name, .{
-            .func = func,
-            .type_params = func.type_params,
-        });
+    // If the function has type parameters OR is an extension on a generic receiver type,
+    // store as a generic template so the call analyzer can monomorphize it.
+    // Generic extension methods (receiver_type_params non-empty) are stored under
+    // "ReceiverName.methodName" so lookup by receiver works.
+    if (func.type_params.len > 0 or func.receiver_type_params.len > 0) {
+        if (func.receiver_type) |receiver| {
+            const key = try std.fmt.allocPrint(self.allocator, "{s}.{s}", .{ receiver, func.name });
+            try self.allocatedStrings.append(self.allocator, key);
+            // Store with all type params (receiver + function level combined)
+            const allTypeParams = try self.allocator.alloc([]const u8, func.receiver_type_params.len + func.type_params.len);
+            try self.allocatedSliceLists.append(self.allocator, allTypeParams);
+            for (func.receiver_type_params, 0..) |p, i| allTypeParams[i] = p;
+            for (func.type_params, 0..) |p, i| allTypeParams[func.receiver_type_params.len + i] = p;
+            try self.genericFns.put(key, .{
+                .func = func,
+                .type_params = allTypeParams,
+            });
+        } else {
+            try self.genericFns.put(func.name, .{
+                .func = func,
+                .type_params = func.type_params,
+            });
+        }
         return;
     }
 

@@ -96,9 +96,10 @@ pub fn analyzeReassignFieldTarget(self: anytype, f: ast.stmt.ZSReassign.FieldTar
                 switch (sym.signature) {
                     .struct_type => |st| {
                         var found = false;
-                        for (st.fields) |field| {
+                        for (st.fields, 0..) |field, i| {
                             if (std.mem.eql(u8, field.name, f.field_name)) {
                                 found = true;
+                                try self.fieldIndices.put(f.startPos, @intCast(i));
                                 break;
                             }
                         }
@@ -120,8 +121,8 @@ pub fn analyzeReassignFieldTarget(self: anytype, f: ast.stmt.ZSReassign.FieldTar
 }
 
 pub fn analyzeFunction(self: anytype, function: ast.stmt.ZSFn) Error!Symbol {
-    // Skip generic function templates — they are analyzed when monomorphized
-    if (function.type_params.len > 0 and self.typeParamBindings == null) {
+    // Skip generic templates — including generic extensions — until they are monomorphized.
+    if ((function.type_params.len > 0 or function.receiver_type_params.len > 0) and self.typeParamBindings == null) {
         return Symbol{
             .name = function.name,
             .assignable = false,
@@ -154,8 +155,41 @@ pub fn analyzeFunction(self: anytype, function: ast.stmt.ZSFn) Error!Symbol {
                     fields[i] = .{ .name = f.name, .type = ft };
                 }
                 break :blk Symbol.ZSTypeNotation{ .struct_type = .{ .name = sd.name, .fields = fields, .type_args = &.{} } };
+            } else if (self.scalarDefs.get(function.receiver_type.?)) |scalarType| blk: {
+                break :blk scalarType;
             } else if (self.enumDefs.get(function.receiver_type.?)) |ed| blk: {
+                // For generic enums, instantiate with type args from active bindings.
+                if (ed.type_params.len > 0) {
+                    if (self.typeParamBindings) |bindings| {
+                        const resolvedArgs = try self.allocator.alloc(Symbol.ZSTypeNotation, ed.type_params.len);
+                        try self.allocatedTypeSlices.append(self.allocator, resolvedArgs);
+                        var allFound = true;
+                        for (ed.type_params, 0..) |tp, i| {
+                            var found = false;
+                            for (bindings.typeParams, 0..) |bp, j| {
+                                if (std.mem.eql(u8, bp, tp)) {
+                                    resolvedArgs[i] = try type_resolver.resolveTypeAnnotationFull(self, .{ .reference = bindings.bindings[j] });
+                                    found = true;
+                                    break;
+                                }
+                            }
+                            if (!found) {
+                                allFound = false;
+                                break;
+                            }
+                        }
+                        if (allFound) {
+                            break :blk try type_resolver.instantiateEnumFromResolved(self, ed, resolvedArgs);
+                        }
+                    }
+                }
                 break :blk try self.buildEnumType(ed);
+            } else if (self.monomorphizedEnums.get(function.receiver_type.?)) |med| blk: {
+                break :blk Symbol.ZSTypeNotation{ .enum_type = .{
+                    .name = med.mangledName,
+                    .variants = med.variants,
+                    .type_args = &.{},
+                } };
             } else Symbol.ZSTypeNotation.unknown;
             try self.tableStack.put(.{
                 .name = "this",
@@ -172,7 +206,12 @@ pub fn analyzeFunction(self: anytype, function: ast.stmt.ZSFn) Error!Symbol {
                 .signature = argType,
             });
         }
+        const savedExpected = self.expectedType;
+        if (retType != .unknown) {
+            self.expectedType = retType;
+        }
         _ = try self.analyzeExpr(body);
+        self.expectedType = savedExpected;
         _ = try self.tableStack.exitScope();
     }
 

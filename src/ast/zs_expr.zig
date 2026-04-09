@@ -25,6 +25,7 @@ const ZSExprType = enum {
     enum_init,
     match_expr,
     lambda,
+    safe_nav,
 };
 
 pub const ZSExpr = union(ZSExprType) {
@@ -50,6 +51,7 @@ pub const ZSExpr = union(ZSExprType) {
     enum_init: ZSEnumInit,
     match_expr: ZSMatchExpr,
     lambda: ZSLambda,
+    safe_nav: ZSSafeNav,
 
     pub fn deinit(self: *const @This(), allocator: std.mem.Allocator) void {
         switch (self.*) {
@@ -70,6 +72,7 @@ pub const ZSExpr = union(ZSExprType) {
             .match_expr => self.match_expr.deinit(allocator),
             .number => self.number.deinit(allocator),
             .lambda => self.lambda.deinit(allocator),
+            .safe_nav => self.safe_nav.deinit(allocator),
             .char, .boolean, .reference, .break_expr, .continue_expr => {},
         }
     }
@@ -111,6 +114,7 @@ pub const ZSExpr = union(ZSExprType) {
             .enum_init => self.enum_init.startPos,
             .match_expr => self.match_expr.startPos,
             .lambda => self.lambda.startPos,
+            .safe_nav => self.safe_nav.startPos,
         };
     }
 
@@ -138,6 +142,7 @@ pub const ZSExpr = union(ZSExprType) {
             .enum_init => self.enum_init.endPos,
             .match_expr => self.match_expr.endPos,
             .lambda => self.lambda.endPos,
+            .safe_nav => self.safe_nav.endPos,
         };
     }
 };
@@ -423,19 +428,45 @@ pub const ZSUnary = struct {
     }
 };
 
+const type_notation = @import("zs_type_notation.zig");
+
 pub const ZSLambdaParam = struct {
     name: []const u8,
+    type: ?type_notation.ZSTypeNotation = null,
 };
 
 pub const ZSLambda = struct {
     params: []ZSLambdaParam,
     body: *ZSExpr,
+    implicit_params_from_context: bool = false,
     startPos: usize,
     endPos: usize,
 
     pub fn deinit(self: *const @This(), allocator: std.mem.Allocator) void {
+        for (self.params) |*param| {
+            if (param.type) |*t| {
+                t.deinit(allocator);
+            }
+        }
         allocator.free(self.params);
         self.body.deinit(allocator);
         allocator.destroy(self.body);
+    }
+};
+
+pub const ZSSafeNav = struct {
+    receiver: *ZSExpr,
+    field: []const u8,
+    call_args: ?[]ZSExpr,
+    startPos: usize,
+    endPos: usize,
+
+    pub fn deinit(self: ZSSafeNav, allocator: std.mem.Allocator) void {
+        self.receiver.deinit(allocator);
+        allocator.destroy(self.receiver);
+        if (self.call_args) |args| {
+            for (args) |*a| a.deinit(allocator);
+            allocator.free(args);
+        }
     }
 };

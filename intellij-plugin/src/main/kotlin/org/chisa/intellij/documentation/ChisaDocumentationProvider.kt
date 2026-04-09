@@ -1,6 +1,7 @@
 package org.chisa.intellij.documentation
 
 import com.intellij.lang.documentation.AbstractDocumentationProvider
+import com.intellij.lang.injection.InjectedLanguageManager
 import com.intellij.openapi.util.text.StringUtil
 import com.intellij.psi.PsiElement
 import org.chisa.intellij.daemon.DaemonService
@@ -14,6 +15,7 @@ class ChisaDocumentationProvider : AbstractDocumentationProvider() {
 
         val ref = originalElement ?: element
         val file = ref.containingFile ?: return base
+        if (InjectedLanguageManager.getInstance(file.project).isInjectedFragment(file)) return base
         val path = file.virtualFile?.path ?: return base
         val content = file.text ?: return base
         val offset = ref.textOffset

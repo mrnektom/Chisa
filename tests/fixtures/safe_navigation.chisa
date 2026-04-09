@@ -1,4 +1,4 @@
-import { Option } from "../../stdlib/Option.zs"
+import { Option } from "../../stdlib/Option.chisa"
 
 struct Address { city: number }
 struct User { name: number, address: Option<Address> }
@@ -6,4 +6,8 @@ struct User { name: number, address: Option<Address> }
 let addr = Option.Some(Address { city: 42 })
 let user = Option.Some(User { name: 1, address: addr })
 
-let city = user?.address?.city
+let name = user?.name
+let city: Option<number> = user?.address?.city
+
+print(name.getOrElse(0))
+print(city.getOrElse(0))

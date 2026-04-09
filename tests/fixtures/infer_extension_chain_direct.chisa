@@ -1,0 +1,8 @@
+import { Option } from "../../stdlib/Option.chisa"
+
+fn number.double(): number = this * 2
+
+let base = Option.Some(42)
+let result = base.getOrElse(0).double()
+
+print(result)

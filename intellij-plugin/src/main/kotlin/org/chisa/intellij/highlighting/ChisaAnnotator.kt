@@ -3,6 +3,7 @@ package org.chisa.intellij.highlighting
 import com.intellij.lang.annotation.AnnotationHolder
 import com.intellij.lang.annotation.Annotator
 import com.intellij.lang.annotation.HighlightSeverity
+import com.intellij.lang.injection.InjectedLanguageManager
 import com.intellij.openapi.editor.colors.TextAttributesKey
 import com.intellij.psi.PsiElement
 import org.chisa.intellij.psi.ChisaEnumVariant
@@ -13,6 +14,7 @@ import org.chisa.intellij.psi.ChisaTokenTypes
 
 class ChisaAnnotator : Annotator {
     override fun annotate(element: PsiElement, holder: AnnotationHolder) {
+        if (InjectedLanguageManager.getInstance(element.project).isInjectedFragment(element.containingFile)) return
         when (element) {
             is ChisaFnDeclaration -> highlightNameIdentifier(element, holder, ChisaSyntaxHighlighter.FUNCTION_NAME)
             is ChisaStructField -> highlightNameIdentifier(element, holder, ChisaSyntaxHighlighter.FIELD_NAME)

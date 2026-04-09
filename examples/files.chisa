@@ -1,8 +1,9 @@
-import { readFile } from "../stdlib/fs.zs"
+import { String } from "../stdlib/String.chisa"
+import { readFile } from "../stdlib/fs.chisa"
 
-let result = readFile("./files.zs")
+let result = readFile("./files.chisa")
 
 match result {
-  Either.Right(content) -> print(content),
-  Either.Left(err) -> print("error reading file")
+    Either.Right(c) -> print(c),
+    Either.Left(err) -> print(err.toString())
 }

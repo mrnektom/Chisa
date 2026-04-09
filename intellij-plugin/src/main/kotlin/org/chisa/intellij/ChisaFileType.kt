@@ -6,6 +6,6 @@ import javax.swing.Icon
 object ChisaFileType : LanguageFileType(ChisaLanguage) {
     override fun getName(): String = "Chisa"
     override fun getDescription(): String = "Chisa language file"
-    override fun getDefaultExtension(): String = "zs"
+    override fun getDefaultExtension(): String = "chisa"
     override fun getIcon(): Icon = ChisaIcons.FILE
 }

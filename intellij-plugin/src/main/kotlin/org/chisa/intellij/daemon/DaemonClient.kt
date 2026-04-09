@@ -7,6 +7,10 @@ import java.net.InetSocketAddress
 import java.net.Socket
 import java.nio.channels.Channels
 import java.nio.channels.SocketChannel
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.locks.ReentrantLock
 
@@ -35,7 +39,7 @@ private interface Connection : Closeable {
 }
 
 private class TcpConnection(host: String, port: Int, timeoutMs: Int) : Connection {
-    private val socket = Socket().apply { connect(InetSocketAddress(host, port), timeoutMs) }
+    private val socket = Socket().apply { setSoTimeout(10_000); connect(InetSocketAddress(host, port), timeoutMs) }
     override val reader = BufferedReader(InputStreamReader(socket.getInputStream(), Charsets.UTF_8))
     override val writer = PrintWriter(BufferedWriter(OutputStreamWriter(socket.getOutputStream(), Charsets.UTF_8)))
     override val isOpen get() = !socket.isClosed
@@ -78,6 +82,9 @@ class DaemonClient(private val tcpPort: Int = 7654) {
     private val lock = ReentrantLock()
     private val idGen = AtomicLong(0)
     private var conn: Connection? = null
+    private val readExecutor = Executors.newSingleThreadExecutor { r ->
+        Thread(r, "zs-daemon-read").apply { isDaemon = true }
+    }
 
     private val isWindows = System.getProperty("os.name", "").lowercase().contains("windows")
     private val unixSocketPath = "/tmp/zs-daemon.sock"
@@ -118,14 +125,19 @@ class DaemonClient(private val tcpPort: Int = 7654) {
     }
 
     fun close() {
-        lock.lock()
-        try { disconnect() } finally { lock.unlock() }
+        readExecutor.shutdown()
+        if (lock.tryLock(2, TimeUnit.SECONDS)) {
+            try { disconnect() } finally { lock.unlock() }
+        }
     }
 
     // ─── Internal ─────────────────────────────────────────────────────────────
 
     private fun send(method: String, file: String, content: String, offset: Long?): JSONObject? {
-        lock.lock()
+        if (!lock.tryLock(5, TimeUnit.SECONDS)) {
+            log.warn("zs-daemon: lock timeout — daemon may be stuck")
+            return null
+        }
         try {
             val c = ensureConnected() ?: return null
             val id = idGen.incrementAndGet()
@@ -133,7 +145,17 @@ class DaemonClient(private val tcpPort: Int = 7654) {
             return try {
                 c.writer.println(req)
                 c.writer.flush()
-                val line = c.reader.readLine() ?: run {
+                val line = try {
+                    readExecutor.submit<String?> { c.reader.readLine() }.get(10, TimeUnit.SECONDS)
+                } catch (e: TimeoutException) {
+                    log.warn("zs-daemon: read timeout")
+                    disconnect()
+                    return null
+                } catch (e: ExecutionException) {
+                    log.warn("zs-daemon: IO error — ${e.cause?.message}")
+                    disconnect()
+                    return null
+                } ?: run {
                     log.warn("zs-daemon: connection closed by peer")
                     disconnect()
                     return null

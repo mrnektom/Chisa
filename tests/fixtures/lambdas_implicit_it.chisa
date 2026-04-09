@@ -1,0 +1,4 @@
+fn applyTwice(x: number, f: (number) -> number): number = f(f(x))
+
+let result = applyTwice(3) { it * 2 }
+print(result)

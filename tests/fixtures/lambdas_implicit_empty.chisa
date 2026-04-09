@@ -1,0 +1,3 @@
+let thunk: () -> number = { 42 }
+let result = thunk()
+print(result)

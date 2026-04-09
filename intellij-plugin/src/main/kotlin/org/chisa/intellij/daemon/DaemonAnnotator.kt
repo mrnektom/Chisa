@@ -3,6 +3,7 @@ package org.chisa.intellij.daemon
 import com.intellij.lang.annotation.AnnotationHolder
 import com.intellij.lang.annotation.ExternalAnnotator
 import com.intellij.lang.annotation.HighlightSeverity
+import com.intellij.lang.injection.InjectedLanguageManager
 import com.intellij.openapi.editor.Document
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.TextRange
@@ -29,6 +30,7 @@ class DaemonAnnotator : ExternalAnnotator<DaemonAnnotator.FileInfo, List<DaemonD
 
     override fun collectInformation(file: PsiFile): FileInfo? {
         if (file !is ChisaFile) return null
+        if (InjectedLanguageManager.getInstance(file.project).isInjectedFragment(file)) return null
         val vf = file.virtualFile ?: return null
         val doc = PsiDocumentManager.getInstance(file.project).getDocument(file) ?: return null
         return FileInfo(

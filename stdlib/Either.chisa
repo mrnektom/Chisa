@@ -17,3 +17,5 @@ export fn Either<L, R>.isOk(): boolean = match this {
   Either.Left(_)  -> false,
   Either.Right(_) -> true
 }
+
+export fn Either<L, R>.toEither(): Either<L, R> = this

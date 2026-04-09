@@ -1,10 +1,7 @@
-import {  } from "stdlib/arraylist.zs"
-let glist = newList<number>(4)
-glist = listPush<number>(glist, 10, 4)
-glist = listPush<number>(glist, 20, 4)
-glist = listPush<number>(glist, 30, 4)
-printNumber(listGet<number>(glist, 0))
-printNumber(listGet<number>(glist, 1))
-printNumber(listGet<number>(glist, 2))
-printNumber(glist.len)
-listFree<number>(glist, 4)
+import { newList } from "stdlib/arraylist.chisa"
+
+let glist = newList<number>(8)
+let glist2 = glist.push<number>(10)
+let val = glist2.get<number>(0)
+print(val)
+glist2.freeList<number>()

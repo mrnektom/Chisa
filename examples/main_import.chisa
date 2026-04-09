@@ -1,4 +1,4 @@
-import { getTen, x as y } from "./lib.zs"
+import { getTen, x as y } from "./lib.chisa"
 external fn printNumber(n: number): void
 printNumber(getTen())
 printNumber(y)

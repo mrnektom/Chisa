@@ -1,5 +1,6 @@
 import { Option } from "./Option.chisa"
 import { Either } from "./Either.chisa"
+import { Unit } from "./Unit.chisa"
 import { List, newList } from "./arraylist.chisa"
 import { free, alloc } from "./mem.chisa"
 import { strConcat, String } from "./String.chisa"
@@ -12,14 +13,10 @@ scalar byte
 scalar boolean
 scalar char
 
-struct Pointer<T> {
-    ptr: long
-}
 
 external fn loadLibrary(path: String): void
 
-external fn ptr<T>(value: T): Pointer<T>
-external fn deref<T>(ptr: Pointer<T>): T
+
 
 
 export fn numberToString(n: number): String {

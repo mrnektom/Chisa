@@ -32,6 +32,7 @@ pub fn analyzeExpr(self: anytype, expr: ast.expr.ZSExpr) Error!Symbol.ZSTypeNota
         .enum_init => self.analyzeEnumInit(expr.enum_init),
         .match_expr => self.analyzeMatchExpr(expr.match_expr),
         .lambda => analyzeLambda(self, expr.lambda),
+        .safe_nav => analyzeSafeNav(self, expr.safe_nav),
     };
 }
 
@@ -47,15 +48,54 @@ pub fn analyzeLambda(self: anytype, lambda: ast.expr.ZSLambda) Error!Symbol.ZSTy
     defer scope.deinit();
     try self.tableStack.enterScope(&scope);
 
-    for (lambda.params) |param| {
+    // Extract expected function arg types from context (e.g., when expectedType is a fn type)
+    const expectedFnArgs: ?[]const sig.ZSFnArg = if (self.expectedType) |et|
+        if (et == .function) et.function.args else null
+    else
+        null;
+
+    const synthesizedImplicitIt = lambda.implicit_params_from_context and expectedFnArgs != null and expectedFnArgs.?.len == 1;
+    if (lambda.implicit_params_from_context and expectedFnArgs != null and expectedFnArgs.?.len > 1) {
+        try self.recordError(lambda, "shorthand lambda requires an expected function type with at most one parameter");
+    }
+
+    if (synthesizedImplicitIt) {
         try self.tableStack.put(.{
-            .name = param.name,
+            .name = "it",
             .assignable = true,
-            .signature = Symbol.ZSTypeNotation.unknown,
+            .signature = expectedFnArgs.?[0].type,
         });
     }
 
+    for (lambda.params, 0..) |param, pi| {
+        const paramSig = if (param.type) |pt|
+            try type_resolver.resolveTypeAnnotationFull(self, pt)
+        else if (expectedFnArgs) |efa|
+            if (pi < efa.len) efa[pi].type else Symbol.ZSTypeNotation.unknown
+        else blk: {
+            const msg = try std.fmt.allocPrint(self.allocator, "cannot infer type of lambda parameter '{s}': add a type annotation", .{param.name});
+            try self.allocatedStrings.append(self.allocator, msg);
+            try self.recordError(lambda, msg);
+            break :blk Symbol.ZSTypeNotation.unknown;
+        };
+        try self.tableStack.put(.{
+            .name = param.name,
+            .assignable = true,
+            .signature = paramSig,
+        });
+    }
+
+    const expectedFnRet: ?Symbol.ZSTypeNotation = if (self.expectedType) |et|
+        if (et == .function) et.function.ret.* else null
+    else
+        null;
+
+    const savedExpected = self.expectedType;
+    if (expectedFnRet) |ret| {
+        self.expectedType = ret;
+    }
     const retType = try self.analyzeExpr(lambda.body.*);
+    self.expectedType = savedExpected;
     _ = try self.tableStack.exitScope();
 
     // Build function type
@@ -63,13 +103,27 @@ pub fn analyzeLambda(self: anytype, lambda: ast.expr.ZSLambda) Error!Symbol.ZSTy
     retPtr.* = retType;
     try self.allocatedTypes.append(self.allocator, retPtr);
 
-    const args = try self.allocator.alloc(sig.ZSFnArg, lambda.params.len);
+    const paramCount = lambda.params.len + @as(usize, if (synthesizedImplicitIt) 1 else 0);
+    const args = try self.allocator.alloc(sig.ZSFnArg, paramCount);
     try self.allocatedFnArgs.append(self.allocator, args);
+    var argIndex: usize = 0;
+    if (synthesizedImplicitIt) {
+        args[0] = .{ .name = "it", .type = expectedFnArgs.?[0].type };
+        argIndex = 1;
+    }
     for (lambda.params, 0..) |param, i| {
-        args[i] = .{ .name = param.name, .type = Symbol.ZSTypeNotation.unknown };
+        const argType = if (param.type) |pt|
+            try type_resolver.resolveTypeAnnotationFull(self, pt)
+        else if (expectedFnArgs) |efa|
+            if (i < efa.len) efa[i].type else Symbol.ZSTypeNotation.unknown
+        else
+            Symbol.ZSTypeNotation.unknown;
+        args[argIndex + i] = .{ .name = param.name, .type = argType };
     }
 
-    return Symbol.ZSTypeNotation{ .function = .{ .ret = retPtr, .args = args } };
+    const fnType = Symbol.ZSTypeNotation{ .function = .{ .ret = retPtr, .args = args } };
+    try self.lambdaTypes.put(lambda.startPos, fnType);
+    return fnType;
 }
 
 pub fn analyzeReference(self: anytype, ref: ast.expr.ZSReference) Error!Symbol.ZSTypeNotation {
@@ -161,11 +215,11 @@ pub fn analyzeBinary(self: anytype, binary: ast.expr.ZSBinary) Error!Symbol.ZSTy
     const op = binary.op;
 
     const isArith = std.mem.eql(u8, op, "+") or std.mem.eql(u8, op, "-") or
-                    std.mem.eql(u8, op, "*") or std.mem.eql(u8, op, "/") or
-                    std.mem.eql(u8, op, "%");
+        std.mem.eql(u8, op, "*") or std.mem.eql(u8, op, "/") or
+        std.mem.eql(u8, op, "%");
     const isLogical = std.mem.eql(u8, op, "&&") or std.mem.eql(u8, op, "||");
     const isOrdered = std.mem.eql(u8, op, "<") or std.mem.eql(u8, op, ">") or
-                      std.mem.eql(u8, op, "<=") or std.mem.eql(u8, op, ">=");
+        std.mem.eql(u8, op, "<=") or std.mem.eql(u8, op, ">=");
     const isEquality = std.mem.eql(u8, op, "==") or std.mem.eql(u8, op, "!=");
 
     // Arithmetic: both operands must be numeric (pointer arithmetic is exempt)
@@ -265,4 +319,75 @@ pub fn analyzeReturn(self: anytype, ret: ast.expr.ZSReturn) Error!Symbol.ZSTypeN
         return result;
     }
     return .unknown;
+}
+
+pub fn analyzeSafeNav(self: anytype, sn: ast.expr.ZSSafeNav) Error!Symbol.ZSTypeNotation {
+    const receiverType = try self.analyzeExpr(sn.receiver.*);
+
+    // Receiver must be Option<T>
+    const innerType: Symbol.ZSTypeNotation = switch (receiverType) {
+        .enum_type => |et| blk: {
+            if (!std.mem.eql(u8, et.name, "Option") or et.type_args.len != 1) {
+                try self.recordError(sn, "?. receiver must be Option<T>");
+                return .unknown;
+            }
+            break :blk et.type_args[0];
+        },
+        else => {
+            try self.recordError(sn, "?. receiver must be Option<T>");
+            return .unknown;
+        },
+    };
+
+    // Resolve field type on the inner type (field access only for now)
+    const fieldType: Symbol.ZSTypeNotation = switch (innerType) {
+        .struct_type => |st| blk: {
+            for (st.fields, 0..) |field, i| {
+                if (std.mem.eql(u8, field.name, sn.field)) {
+                    try self.fieldIndices.put(sn.startPos, @intCast(i));
+                    break :blk field.type;
+                }
+            }
+            try self.recordError(sn, "Field not found in struct");
+            return .unknown;
+        },
+        else => {
+            try self.recordError(sn, "Cannot access field on non-struct type via ?.");
+            return .unknown;
+        },
+    };
+
+    // flatMap mode: field is itself Option<U> → result is Option<U>
+    // map mode:     field is plain T          → result is Option<T>
+    const isFlatMap = switch (fieldType) {
+        .enum_type => |et| std.mem.eql(u8, et.name, "Option"),
+        else => false,
+    };
+
+    // Compute mangled Option enum names for IR gen
+    const receiverEnumName = try type_resolver.computeEnumMangledName(self, "Option", receiverType.enum_type.type_args);
+
+    const resultEnumName = if (isFlatMap)
+        try type_resolver.computeEnumMangledName(self, "Option", fieldType.enum_type.type_args)
+    else
+        try type_resolver.computeEnumMangledName(self, "Option", &.{fieldType});
+
+    try self.safeNavInfo.put(sn.startPos, .{
+        .isFlatMap = isFlatMap,
+        .receiverEnumName = receiverEnumName,
+        .resultEnumName = resultEnumName,
+        .fieldIndex = self.fieldIndices.get(sn.startPos) orelse 0,
+    });
+
+    // Return type
+    if (isFlatMap) {
+        return fieldType;
+    } else {
+        // Build Option<fieldType> using the Option enum def
+        const optionEd = self.enumDefs.get("Option") orelse {
+            try self.recordError(sn, "Option type not found in scope");
+            return .unknown;
+        };
+        return try type_resolver.instantiateEnumFromResolved(self, optionEd, &.{fieldType});
+    }
 }

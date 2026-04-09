@@ -1,0 +1,7 @@
+import { Option } from "../../stdlib/Option.chisa"
+
+let result = Option.Some(20)
+    .map { x -> x * 2 }
+    .getOrElse(0)
+
+print(result)

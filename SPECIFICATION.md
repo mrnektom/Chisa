@@ -1,4 +1,4 @@
-# ZenScript Language Specification
+# chisa Language Specification
 
 > Current version. Reflects what is implemented and functional in the compiler pipeline.
 
@@ -7,14 +7,71 @@
 ## Compilation Pipeline
 
 ```
-.zs source → Tokenizer → Parser → Analyzer → IRGen → (LLVMCodeGen — disabled)
+.chisa source → Tokenizer → Parser → Analyzer → IRGen → LLVMCodeGen → native executable
 ```
+
+### Compiler CLI
+
+```bash
+zig build run -- -i <file.chisa> -o <output>        # compile to native executable
+zig build run -- -i <file.chisa> -r                 # JIT-run via MCJIT
+zig build run -- -i <file.chisa> -dump-ir           # dump LLVM IR
+zig build run -- -i <file.chisa> -dump-symbols      # dump all symbols as JSON
+zig build run -- -i <file.chisa> -v                 # verbose: print compilation stages
+```
+
+---
+
+## Comments
+
+Comments are ignored by the compiler and may appear anywhere whitespace is allowed.
+
+```chisa
+// full-line comment
+let x = 42   // trailing comment
+
+/*
+multi-line
+block comment
+*/
+
+/// documentation comment for the next declaration
+fn add(a: number, b: number): number = a + b
+
+/**
+ * multi-line documentation comment
+ * for the next declaration
+ */
+struct Point { x: number, y: number }
+```
+
+### Line comments
+
+Line comments begin with `//` and continue to the end of the current line.
+
+### Block comments
+
+Block comments begin with `/*` and end with `*/`. They may span multiple lines.
+
+### Documentation comments
+
+Documentation comments attach descriptive text to the declaration that immediately follows them.
+
+- `///` starts a single-line documentation comment.
+- `/** ... */` starts a block documentation comment.
+
+### Constraints
+
+- Comments do not affect program semantics.
+- Documentation comments apply to the next declaration.
+- Ordinary comments and documentation comments are distinct forms: `//` and `/* ... */` are non-documenting, while
+  `///` and `/** ... */` are documenting.
 
 ---
 
 ## Variables
 
-```zenscript
+```chisa
 let x: number = 42      // mutable variable
 const name = "hello"    // constant
 x = 100                 // reassignment
@@ -44,33 +101,33 @@ Type annotation is optional — the analyzer infers types where possible.
 
 Scalar (primitive) types are declared in stdlib using the `scalar` keyword:
 
-```zs
+```chisa
 scalar number
 scalar long
 ```
 
 Valid scalar names: `number`, `long`, `short`, `byte`, `boolean`, `char`. Declaring an unknown name is a compile error.
-`stdlib/prelude.zs` declares all built-in scalar types, making them available in every module.
+`stdlib/prelude.chisa` declares all built-in scalar types, making them available in every module.
 
 ---
 
 ## Functions
 
-```zenscript
+```chisa
 fn add(a: number, b: number): number = a + b
 
 fn process<T>(value: T): T {
-    return value
+    return value    // generic identity function
 }
 
-external fn print(n: number): void
+external fn print(n: number): void   // provided by the host/runtime
 
-export fn getTen(): number = 10
+export fn getTen(): number = 10      // visible to importing modules
 ```
 
 - Parameters and return type can be annotated explicitly.
 - Generic type parameters are declared with `<T, U, ...>`.
-- `external` declares a function implemented outside ZenScript.
+- `external` declares a function implemented outside chisa.
 - `export` marks a function visible to other modules.
 - Function overloading is supported (same name, different signatures).
 
@@ -80,7 +137,7 @@ export fn getTen(): number = 10
 
 Extension functions add methods to existing types without modifying the original type definition.
 
-```zenscript
+```chisa
 fn number.double(): number = this * 2
 
 fn number.clamp(min: number, max: number): number =
@@ -91,7 +148,7 @@ fn string.isEmpty(): boolean = this.length == 0
 fn Point.translate(dx: number, dy: number): Point =
     Point { x: this.x + dx, y: this.y + dy }
 
-fn Point.distanceSq(other: Point): number = {
+fn Point.distanceSq(other: Point): number {
     let dx = this.x - other.x
     let dy = this.y - other.y
     dx * dx + dy * dy
@@ -100,21 +157,21 @@ fn Point.distanceSq(other: Point): number = {
 
 ### Generic extensions
 
-```zenscript
+```chisa
 fn Option<T>.getOrElse(default: T): T = match this {
-    Option.Some(v) -> v,
-    Option.None    -> default
+    Option.Some(v) -> v,        // unwrap the present value
+    Option.None    -> default   // fall back to the caller-provided default
 }
 
 fn Result<T, E>.isOk(): boolean = match this {
-    Result.Ok(_)  -> true,
+    Result.Ok(_)  -> true,      // ignore payload, only care about variant
     Result.Err(_) -> false
 }
 ```
 
 ### Call syntax
 
-```zenscript
+```chisa
 let n = 5
 let d = n.double()               // 10
 let c = n.clamp(0, 3)            // 3
@@ -141,15 +198,19 @@ let v = opt.getOrElse(0)         // 42
 
 Lambda expressions create anonymous function values.
 
-```zenscript
+In expression position, `{ ... }` is reserved for lambda syntax. Plain block expressions are not part of the language.
+
+```chisa
 let greet  = { -> "hello" }                         // no parameters
 let double = { x -> x * 2 }                         // one param, type inferred
-let add    = { a: number, b: number -> a + b }       // explicit types
+let add    = { a: number, b: number -> a + b }      // explicit parameter types
+let thunk: () -> string = { "hello" }               // no parameters, `->` omitted in typed context
+let inc:   (number) -> number = { it + 1 }          // single expected parameter is implicit `it`
 
 // Block body — last expression is the return value
 let compute = { x: number ->
-    let tmp = x * x
-    tmp + 1
+    let tmp = x * x      // local inside the lambda body
+    tmp + 1              // implicit return value
 }
 ```
 
@@ -157,20 +218,31 @@ let compute = { x: number ->
 
 When the last argument of a call is a lambda it can be placed outside the parentheses:
 
-```zenscript
+```chisa
 list.map { x -> x * 2 }
+list.map { it * 2 }
 list.filter { x -> x > 0 }
 list.fold(0) { acc, x -> acc + x }
 ```
+
+### Lambda shorthand from expected type
+
+If a lambda appears in a context with an expected function type, two shorthand forms are available:
+
+- For `() -> R`, `{ expr }` is treated as a zero-argument lambda.
+- For `(T) -> R`, the single parameter may be omitted and is implicitly available as `it`.
+
+These shorthands are only valid when the expected function type is known from context. Without an expected function
+type, `{ ... }` remains a normal block expression.
 
 ### Closures
 
 Lambdas capture variables from the enclosing scope **by reference** — mutations are visible on both sides of the closure
 boundary:
 
-```zenscript
+```chisa
 let count = 0
-let inc   = { -> count = count + 1 }
+let inc   = { -> count = count + 1 }   // mutates captured state
 
 inc()
 inc()
@@ -181,7 +253,7 @@ inc()
 
 A stored function value is called with the same syntax as a named function:
 
-```zenscript
+```chisa
 let result = add(3, 4)   // 7
 ```
 
@@ -191,10 +263,12 @@ let result = add(3, 4)   // 7
 
 Function types are written as `(ParamType, ...) -> ReturnType`.
 
-```zenscript
+```chisa
 let f:      (number) -> number  = { x -> x * 2 }
 let pred:   (number) -> boolean = { x -> x > 0 }
-let action: () -> void          = { -> print(42) }
+let action: () -> void          = { -> print(42) }   // no parameters, no useful result
+let lazy:   () -> number        = { 42 }
+let next:   (number) -> number  = { it + 1 }
 ```
 
 Function types are first-class — they can appear anywhere a type is expected: variable annotations, parameters, and
@@ -202,7 +276,7 @@ return types.
 
 ### Higher-order functions
 
-```zenscript
+```chisa
 fn apply(f: (number) -> number, x: number): number = f(x)
 
 fn makeAdder(n: number): (number) -> number = { x -> x + n }
@@ -215,7 +289,7 @@ let result  = addFive(3)    // 8
 
 `type` declares an alias for any type expression.
 
-```zenscript
+```chisa
 type Predicate<T>    = (T) -> boolean
 type Transform<A, B> = (A) -> B
 type Action          = () -> void
@@ -224,7 +298,7 @@ type Action          = () -> void
 Aliases are purely structural — `Predicate<number>` and `(number) -> boolean` are interchangeable. `export type` exports
 an alias to other modules.
 
-```zenscript
+```chisa
 fn filter<T>(arr: T[], pred: Predicate<T>): T[] = ...
 
 export type Callback = (string) -> void
@@ -239,7 +313,7 @@ or extension call to the wrapped value only if it is `Some`, and propagates `Non
 
 ### Syntax and desugaring
 
-```zenscript
+```chisa
 opt?.field          // opt.map { v -> v.field }
 opt?.method(args)   // opt.map { v -> v.method(args) }
 opt?.ext(args)      // opt.map { v -> v.ext(args) }   (extension functions included)
@@ -250,26 +324,26 @@ function.
 
 ### Examples
 
-```zenscript
+```chisa
 struct Address { city: string }
-struct User    { name: string, address: Option<Address> }
+struct User    { name: string, address: Option<Address> }   // nested option field
 
 let user: Option<User> = Option.Some(User { name: "Alice", address: Option.Some(Address { city: "NY" }) })
 
-let name: Option<string> = user?.name          // Option.Some("Alice")
-let city: Option<string> = user?.address?.city // Option.Some("NY")
+let name: Option<string> = user?.name          // safe field read on Option<User>
+let city: Option<string> = user?.address?.city // short-circuits to None at any missing step
 ```
 
 Field access via regular `.` and safe access via `?.` can be mixed in the same chain:
 
-```zenscript
+```chisa
 // address is Option<Address>, city is a plain string field on Address
 let city = user?.address?.city   // Option<string>
 ```
 
 ### Extension calls
 
-```zenscript
+```chisa
 fn string.upper(): string = ...
 
 let name: Option<string> = Option.Some("alice")
@@ -280,7 +354,7 @@ let up: Option<string>   = name?.upper()   // Option.Some("ALICE")
 
 `?.` is left-associative. Each step receives the `Option` produced by the previous step:
 
-```zenscript
+```chisa
 // a: Option<A>,  b: B field on A,  c: C field on B
 let val: Option<C> = a?.b?.c
 // equivalent to: a.map { v -> v.b }.map { v -> v.c }
@@ -290,7 +364,7 @@ let val: Option<C> = a?.b?.c
 
 Combine with `getOrElse` (an extension on `Option<T>`) to extract a default value:
 
-```zenscript
+```chisa
 let city: string = user?.address?.city.getOrElse("unknown")
 ```
 
@@ -303,29 +377,30 @@ let city: string = user?.address?.city.getOrElse("unknown")
 
 ## `!!` Operator (Error Propagation)
 
-`!!` is a postfix operator for propagating errors out of the current function. It either returns early (on `Left`) or unwraps the value (on `Right`).
+`!!` is a postfix operator for propagating errors out of the current function. It either returns early (on `Left`) or
+unwraps the value (on `Right`).
 
 ### Desugaring
 
 When the operand is already `Either<L, R>`, `!!` matches it directly — no `.toEither()` call is made:
 
-```zenscript
+```chisa
 eitherExpr!!
 // expands to:
 match eitherExpr {
-    Either.Left(e)  -> return e,
-    Either.Right(v) -> v
+    Either.Left(e)  -> return e,   // propagate the error immediately
+    Either.Right(v) -> v           // continue with the unwrapped success value
 }
 ```
 
 When the operand is any other type, `.toEither()` is called first:
 
-```zenscript
+```chisa
 expr!!
 // expands to:
 match expr.toEither() {
-    Either.Left(e)  -> return e,
-    Either.Right(v) -> v
+    Either.Left(e)  -> return e,   // convert-and-propagate failure
+    Either.Right(v) -> v           // convert-and-unwrap success
 }
 ```
 
@@ -339,13 +414,13 @@ The type of the whole `expr!!` expression is `Right`.
 
 ### Usage with `Either` directly
 
-```zenscript
+```chisa
 fn divide(a: number, b: number): Either<string, number> =
     if (b == 0) Either.Left("division by zero") else Either.Right(a / b)
 
 fn compute(): string {
-    let result: number = divide(10, 2)!!   // returns "division by zero" if Left
-    result * 3                              // reached only when Right
+    let result: number = divide(10, 2)!!   // exits early from compute() on Left
+    result * 3                             // executed only after successful unwrap
 }
 ```
 
@@ -356,11 +431,11 @@ fn compute(): string {
 - `Option.None` → `Either.Left(Unit)`
 - `Option.Some(v)` → `Either.Right(v)`
 
-```zenscript
+```chisa
 fn findUser(id: number): Option<string> = ...
 
 fn greet(): Unit {
-    let name: string = findUser(42)!!   // returns Unit when None
+    let name: string = findUser(42)!!   // Option<T>.toEither() maps None to Left(Unit)
     print(name)
 }
 ```
@@ -369,7 +444,7 @@ fn greet(): Unit {
 
 Any type can participate in `!!` by defining a `toEither()` extension:
 
-```zenscript
+```chisa
 enum ParseError { InvalidInput, Overflow }
 struct ParseResult { value: number, error: Option<ParseError> }
 
@@ -389,13 +464,13 @@ fn run(): ParseError {
 
 ## Structs
 
-```zenscript
+```chisa
 struct Point { x: number, y: number }
 struct Pair<T, U> { first: T, second: U }
 
-let p = Point { x: 10, y: 20 }
-let val = p.x
-p.x = 5
+let p = Point { x: 10, y: 20 }   // struct literal
+let val = p.x                    // field read
+p.x = 5                          // field write
 ```
 
 - Fields are declared with explicit type annotations.
@@ -406,11 +481,11 @@ p.x = 5
 
 ## Enums
 
-```zenscript
+```chisa
 enum Option<T> { Some(T), None }
 enum Result<T, E> { Ok(T), Err(E) }
 
-let x = Option.Some(42)
+let x = Option.Some(42)   // variant constructor with payload
 ```
 
 - Variants can carry a payload type: `Some(T)`.
@@ -426,11 +501,11 @@ matches anything.
 
 ### Primitives
 
-```zenscript
+```chisa
 let result = match x {
-    0    -> "zero",
+    0    -> "zero",   // literal pattern
     1    -> "one",
-    else -> "other"
+    else -> "other"   // wildcard fallback
 }
 ```
 
@@ -438,9 +513,9 @@ Supported for `number`, `boolean`, `char`, and `string` literals.
 
 ### Enums
 
-```zenscript
+```chisa
 let result = match x {
-    Option.Some(v) -> v + 1,
+    Option.Some(v) -> v + 1,   // bind payload to `v`
     Option.None    -> 0
 }
 ```
@@ -449,10 +524,10 @@ Payload variables are bound in the arm body.
 
 ### Structs
 
-```zenscript
+```chisa
 let result = match p {
-    Point { x: 0, y } -> y,
-    Point { x, y }    -> x + y
+    Point { x: 0, y } -> y,       // mix literal match and binding
+    Point { x, y }    -> x + y    // bind both fields by name
 }
 ```
 
@@ -460,7 +535,7 @@ Fields can be matched by value (`x: 0`) or simply bound as a variable (`y`). Unm
 
 ### Wildcard
 
-```zenscript
+```chisa
 let result = match x {
     0    -> "zero",
     else -> "non-zero"
@@ -475,13 +550,13 @@ let result = match x {
 
 ### If
 
-```zenscript
+```chisa
 let y = if (x > 0) x else 0
 
 if (flag) {
-    doSomething()
+    doSomething()   // executed when the condition is true
 } else {
-    doOther()
+    doOther()       // executed otherwise
 }
 ```
 
@@ -489,7 +564,7 @@ if (flag) {
 
 ### While
 
-```zenscript
+```chisa
 while (cond) {
     body
 }
@@ -497,26 +572,17 @@ while (cond) {
 
 ### For
 
-```zenscript
+```chisa
 for (let i = 0; i < 10; i = i + 1) {
-    if (i == 3) continue
-    if (i == 7) break
+    if (i == 3) continue   // skip this iteration
+    if (i == 7) break      // exit the loop entirely
     print(i)
-}
-```
-
-### Blocks
-
-```zenscript
-let z = {
-    let tmp = x + 1
-    tmp * 2         // last expression is the block value
 }
 ```
 
 ### Return / Break / Continue
 
-```zenscript
+```chisa
 return value
 return
 break
@@ -538,7 +604,7 @@ continue
 
 ## Arrays
 
-```zenscript
+```chisa
 let arr = [1, 2, 3]
 let v = arr[0]
 arr[1] = 99
@@ -550,13 +616,13 @@ Array type is written as `number[]`. Index access supports chaining: `arr[i][j]`
 
 ## Pointers
 
-```zenscript
+```chisa
 let x = 42
-let p = ptr(x)
-let y = deref(p)
+let p = ptr(x)      // take the address of `x`
+let y = deref(p)    // read the pointed-to value
 
-let mem = alloc(4096)
-free(mem, 4096)
+let mem = alloc(4096)   // raw heap allocation
+free(mem, 4096)         // caller must free manually
 ```
 
 Pointer type is written as `Pointer<T>`. `ptr`, `deref`, `alloc`, and `free` are built-in operations.
@@ -565,11 +631,12 @@ Pointer type is written as `Pointer<T>`. `ptr`, `deref`, `alloc`, and `free` are
 
 ## Inline Assembly
 
-`asm { }` embeds raw assembly instructions directly inside a function body. Bindings explicitly map ZenScript values to registers and back.
+`asm { }` embeds raw assembly instructions directly inside a function body. Bindings explicitly map chisa values to
+registers and back.
 
 ### Syntax
 
-```zenscript
+```chisa
 asm {
     in  <reg> = <expr>    // input binding
     in  <reg> = <expr>
@@ -584,33 +651,33 @@ All `in`, `out`, and `clobber` lines must appear before the instruction strings.
 
 ### Bindings
 
-| Binding | Meaning |
-|---------|---------|
-| `in reg = expr` | Evaluates `expr` and loads the result into `reg` before the instructions run |
-| `out reg = name` | After the instructions, reads `reg` and declares `let name` in the enclosing scope |
+| Binding            | Meaning                                                                                                              |
+|--------------------|----------------------------------------------------------------------------------------------------------------------|
+| `in reg = expr`    | Evaluates `expr` and loads the result into `reg` before the instructions run                                         |
+| `out reg = name`   | After the instructions, reads `reg` and declares `let name` in the enclosing scope                                   |
 | `clobber reg, ...` | Declares registers that the asm modifies without an `out` binding; lets the compiler avoid placing live values there |
 
 ### Example — Linux syscalls
 
-```zenscript
+```chisa
 // exit(0)
 fn exit(): Unit {
     asm {
-        in rax = 60
-        in rdi = 0
-        "syscall"
+        in rax = 60   // Linux x86-64 syscall number for exit
+        in rdi = 0    // exit status
+        "syscall"     // transfer control to the kernel
     }
 }
 
 // write(fd, buf, len) → bytes written
 fn write(fd: number, buf: Pointer<byte>, len: number): number {
     asm {
-        in  rax = 1
-        in  rdi = fd
-        in  rsi = buf
-        in  rdx = len
-        out rax = written
-        clobber rcx, r11
+        in  rax = 1           // syscall number for write
+        in  rdi = fd          // file descriptor
+        in  rsi = buf         // buffer pointer
+        in  rdx = len         // buffer length
+        out rax = written     // kernel return value
+        clobber rcx, r11      // registers overwritten by syscall
         "syscall"
     }
     written
@@ -629,16 +696,18 @@ fn write(fd: number, buf: Pointer<byte>, len: number): number {
 
 ## Conditional Compilation
 
-Conditional compilation selects declarations, statements, or expressions at compile time based on the target platform or user-defined flags. The keyword is `when`; conditions are compile-time predicates, not runtime expressions.
+Conditional compilation selects declarations, statements, or expressions at compile time based on the target platform or
+user-defined flags. The keyword is `when`; conditions are compile-time predicates, not runtime expressions.
 
 ### File-level: `@target`
 
-`@target` at the top of a file makes the entire file conditional. The file is included in the build only when the condition is true.
+`@target` at the top of a file makes the entire file conditional. The file is included in the build only when the
+condition is true.
 
-```zenscript
+```chisa
 @target(os == "linux")
 
-// everything below is compiled only for Linux
+// everything below is compiled only when `os` is "linux"
 fn exit(): Unit {
     asm {
         in rax = 60
@@ -650,9 +719,10 @@ fn exit(): Unit {
 
 ### Top-level `when`
 
-`when` selects which top-level declarations to emit. Each arm contains a single declaration or a `{ }` block of declarations.
+`when` selects which top-level declarations to emit. Each arm contains a single declaration or a `{ }` block of
+declarations.
 
-```zenscript
+```chisa
 when {
     os == "linux" -> fn exit(): Unit {
         asm { in rax = 60; in rdi = 0; "syscall" }
@@ -660,7 +730,7 @@ when {
     os == "windows" -> fn exit(): Unit {
         ExitProcess(0)
     }
-    else -> external fn exit(): Unit
+    else -> external fn exit(): Unit   // fallback for unsupported targets
 }
 
 // Multi-declaration arm
@@ -680,10 +750,10 @@ when {
 
 `when` can also appear as a statement or expression inside a function body.
 
-```zenscript
+```chisa
 // as expression
 fn pageSize(): number = when {
-    arch == "x86_64"  -> 4096,
+    arch == "x86_64"  -> 4096,    // common page size on x86-64
     arch == "aarch64" -> 16384,
     else              -> 4096
 }
@@ -699,22 +769,22 @@ fn setup(): Unit {
 
 ### Built-in compile-time variables
 
-| Variable | Type   | Example values                              |
-|----------|--------|---------------------------------------------|
+| Variable | Type   | Example values                                 |
+|----------|--------|------------------------------------------------|
 | `os`     | string | `"linux"`, `"windows"`, `"macos"`, `"freebsd"` |
-| `arch`   | string | `"x86_64"`, `"aarch64"`, `"wasm32"`         |
+| `arch`   | string | `"x86_64"`, `"aarch64"`, `"wasm32"`            |
 
 ### User-defined flags
 
 Flags are passed to the compiler with `-D`:
 
 ```
-zs build -D debug -D profile=embedded src/main.zs
+chisa build -D debug -D profile=embedded src/main.chisa
 ```
 
 Inside `when`, a boolean flag is referenced by name; a string flag uses `==`:
 
-```zenscript
+```chisa
 when {
     debug                -> print("debug build")
     profile == "embedded" -> useStaticAlloc()
@@ -724,29 +794,32 @@ when {
 
 ### Condition syntax
 
-| Form | Meaning |
-|------|---------|
+| Form                  | Meaning                                                    |
+|-----------------------|------------------------------------------------------------|
 | `variable == "value"` | String equality against a built-in variable or string flag |
-| `flagname` | True if `-D flagname` was passed |
-| `!cond` | Logical not |
-| `cond && cond` | Logical and |
-| `cond \|\| cond` | Logical or |
+| `flagname`            | True if `-D flagname` was passed                           |
+| `!cond`               | Logical not                                                |
+| `cond && cond`        | Logical and                                                |
+| `cond \|\| cond`      | Logical or                                                 |
 
 ### Semantics
 
-- Compile-time `when` is evaluated before type-checking. Non-matching arms are ignored completely — they are not type-checked and emit no code or declarations.
-- `when` is syntactically distinct from runtime `match`: `match` requires an expression to match against; `when` uses bare conditions.
+- Compile-time `when` is evaluated before type-checking. Non-matching arms are ignored completely — they are not
+  type-checked and emit no code or declarations.
+- `when` is syntactically distinct from runtime `match`: `match` requires an expression to match against; `when` uses
+  bare conditions.
 - If no arm matches and there is no `else`, nothing is emitted — this is not an error.
-- `when` used as an expression inside a function requires all matching arms to produce compatible types (same rules as `if`).
+- `when` used as an expression inside a function requires all matching arms to produce compatible types (same rules as
+  `if`).
 - `@target` must appear before any declarations in a file; only one `@target` per file is allowed.
 
 ---
 
 ## Imports and Exports
 
-```zenscript
-import { getTen, x as alias } from "./lib.zs"
-export { helper }
+```chisa
+import { getTen, x as alias } from "./lib.chisa"
+export { someFn } from "./other_lib.chisa"   // re-export from another module
 
 export fn helper(): number = 1
 export struct Point { x: number, y: number }
@@ -764,7 +837,7 @@ The standard library (`stdlib/`) is automatically available in every module via 
 
 ### `Option<T>`
 
-```zenscript
+```chisa
 enum Option<T> { Some(T), None }
 ```
 
@@ -776,7 +849,7 @@ enum Option<T> { Some(T), None }
 
 ### `Either<Left, Right>`
 
-```zenscript
+```chisa
 enum Either<Left, Right> { Left(Left), Right(Right) }
 ```
 
@@ -798,7 +871,7 @@ return type `Unit`.
 |------------|-----------------------------------------------|--------------------------------------------|
 | `let`      | variable                                      | mutable binding                            |
 | `const`    | variable                                      | immutable binding                          |
-| `external` | function                                      | implemented outside ZenScript              |
+| `external` | function                                      | implemented outside chisa                  |
 | `export`   | any top-level declaration, extension function | visible to other modules                   |
 | `type`     | type alias declaration                        | names a type expression; supports generics |
 
@@ -806,6 +879,159 @@ return type `Unit`.
 
 ## Known Limitations (current version)
 
-- **LLVM codegen is disabled** — the pipeline produces IR but does not emit machine code.
-- **Type inference is partial** — complex expressions may fall back to `unknown`.
-- **No null safety** — no `null` type; use `Option<T>` and `?.` instead.
+### Language features
+
+- **Type inference is partial and context-driven** — the analyzer infers types reliably for straightforward local
+  expressions, direct calls, and generic constructions where the concrete type can be read from argument payloads or
+  from an expected target type. Inference is much weaker when the only evidence is indirect.
+
+  Works well when the type is visible directly:
+
+  ```chisa
+  let n = 42
+  let ok = Option.Some(42)              // infers Option<number>
+  let f: (number) -> number = { x -> x + 1 }
+  ```
+
+  Weakens when the result type must be reconstructed from several steps of generic flow:
+
+  ```chisa
+  let value =
+      Option.Some(42)
+          .map { x -> x + 1 }
+          .map { y -> y.toString() }
+  // May require an explicit type on `value` or on one of the lambdas.
+  ```
+
+- **Generic call inference depends on declared parameter shapes** — for generic functions and generic extension methods,
+  type parameters are inferred by matching the declared parameter types against the actual argument types, and sometimes
+  against the expected result type. If a type parameter appears only in a position the analyzer cannot use as evidence,
+  monomorphization does not happen and the call must be written with explicit type arguments or stronger surrounding
+  type annotations.
+
+  Typical case that works:
+
+  ```chisa
+  fn wrap<T>(value: T): Option<T> = Option.Some(value)
+
+  let a = wrap(42)                      // infers T = number
+  ```
+
+  Case that may need extra help because the type parameter is driven indirectly:
+
+  ```chisa
+  fn makeDefault<T>(f: () -> T): T = f()
+
+  let x = makeDefault { -> 42 }         // usually OK
+  let y = makeDefault { -> Option.None }
+  // `T` may be impossible to infer here without an expected type.
+  ```
+
+  In practice this often means writing:
+
+  ```chisa
+  let y: Option<number> = makeDefault { -> Option.None }
+  ```
+
+- **Expected-type propagation is limited** — contextual typing is used in some places, such as typed higher-order
+  parameters and expected enum result types, but it does not flow through every expression form. As a result, code that
+  is theoretically inferable may still need an explicit variable type, function parameter type, or return type to
+  compile.
+
+  Example where the surrounding type gives the analyzer enough information:
+
+  ```chisa
+  let pred: (number) -> boolean = { x -> x > 0 }
+  ```
+
+  Equivalent code without the expected type may fail:
+
+  ```chisa
+  let pred = { x -> x > 0 }
+  // `x` has no declared type and no expected function type to inherit from.
+  ```
+
+- **Generic enum constructors need contextual type information** — unit variants such as `Option.None` can instantiate
+  a generic enum only when the surrounding expression already tells the analyzer which concrete enum type is expected.
+  Without that context, the constructor has no payload from which to infer type arguments.
+
+  Works when the expected type is present:
+
+  ```chisa
+  let value: Option<number> = Option.None
+  ```
+
+  Fails without the surrounding type:
+
+  ```chisa
+  let value = Option.None
+  // compile error: cannot infer type arguments for generic enum
+  ```
+
+- **Standalone lambda parameters are not inferred** — a lambda parameter type is inferred only when the lambda appears
+  in a context with an expected function type (for example, when passed to a typed higher-order function or assigned to
+  a variable with a function type). Otherwise parameter annotations are required. In contexts with an expected
+  zero-parameter function type, `{ ... }` is treated as a lambda body with no `->`. In contexts with an expected
+  single-parameter function type, the parameter may be omitted entirely and is available as `it`.
+
+  Works:
+
+  ```chisa
+  fn applyTwice(f: (number) -> number, x: number): number = f(f(x))
+  fn runLater(f: () -> number): number = f()
+
+  let result = applyTwice({ n -> n + 1 }, 10)
+  // `n` is inferred as `number` from the declared parameter type of `applyTwice`.
+
+  let result2 = applyTwice({ it + 1 }, 10)
+  // `it` is implicitly introduced as the single expected lambda parameter.
+
+  let result3 = runLater({ 42 })
+  // the expected `() -> number` type makes the block expression an argument-less lambda.
+  ```
+
+  Does not work without annotation or context:
+
+  ```chisa
+  let inc = { n -> n + 1 }
+  // compile error: cannot infer type of lambda parameter `n`
+  ```
+
+  Required workaround:
+
+  ```chisa
+  let inc = { n: number -> n + 1 }
+  // or
+  let inc: (number) -> number = { n -> n + 1 }
+  ```
+
+- **Nested higher-order and generic chains are the weakest case** — inference becomes fragile when lambdas, generic
+  returns, extension chains, and propagated expected types all interact in the same expression. Breaking the expression
+  into intermediate bindings with explicit types is often required.
+
+  For example:
+
+  ```chisa
+  let result =
+      users
+          .map { user -> user.address }
+          .map { address -> address.city }
+          .getOrElse("unknown")
+  ```
+
+  This style may need to be rewritten as:
+
+  ```chisa
+  let addresses: Option<Address> = users.map { user: User -> user.address }
+  let cities: Option<string> = addresses.map { address: Address -> address.city }
+  let result = cities.getOrElse("unknown")
+  ```
+
+- **Inference failures are not always reported cleanly** — when the analyzer cannot resolve a type, diagnostics may
+  still surface the internal placeholder `unknown` instead of a more specific user-facing type error.
+- **`comptime { }` / `runtime { }` blocks are not implemented inside function bodies** — parser/tests reserve this
+  syntax, but the current compiler does not analyze, execute, or lower these blocks yet.
+
+### Design notes
+
+- **No `null`** — by design. Use `Option<T>` and `?.` instead.

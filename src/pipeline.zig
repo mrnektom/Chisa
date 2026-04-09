@@ -8,33 +8,43 @@ const ir = @import("ir/zsir.zig");
 const llvm = @import("codegen/llvm_codegen.zig");
 const llvm_lib = @import("llvm");
 const core = llvm_lib.core;
-const engine = llvm_lib.engine;
 const Args = @import("args/args.zig");
 const zsm = @import("ast/zs_module.zig");
 const type_notation = @import("ast/zs_type_notation.zig");
 const Preprocessor = @import("preprocessor.zig");
+const dump_symbols = @import("dump_symbols.zig");
+const computeMangledName = @import("ZenScript").MangleHelpers.computeMangledName;
 
 /// Convert an AST type notation to the string name used by codegen's mapType.
-fn resolveFieldTypeName(t: type_notation.ZSTypeNotation) []const u8 {
+fn resolveFieldTypeName(allocator: std.mem.Allocator, t: type_notation.ZSTypeNotation) ![]const u8 {
     return switch (t) {
         .reference => |ref| {
-            if (std.mem.eql(u8, ref, "number") or std.mem.eql(u8, ref, "int")) return "number";
-            if (std.mem.eql(u8, ref, "long")) return "long";
-            if (std.mem.eql(u8, ref, "short")) return "short";
-            if (std.mem.eql(u8, ref, "byte")) return "byte";
-            if (std.mem.eql(u8, ref, "boolean")) return "boolean";
-            if (std.mem.eql(u8, ref, "char")) return "char";
-            if (std.mem.eql(u8, ref, "String")) return "String";
-            if (std.mem.eql(u8, ref, "c_string")) return "c_string";
-            if (std.mem.eql(u8, ref, "void")) return "void";
-            return ref; // struct name — will be looked up in registry
+            if (std.mem.eql(u8, ref, "number") or std.mem.eql(u8, ref, "int")) return allocator.dupe(u8, "number");
+            if (std.mem.eql(u8, ref, "long")) return allocator.dupe(u8, "long");
+            if (std.mem.eql(u8, ref, "short")) return allocator.dupe(u8, "short");
+            if (std.mem.eql(u8, ref, "byte")) return allocator.dupe(u8, "byte");
+            if (std.mem.eql(u8, ref, "boolean")) return allocator.dupe(u8, "boolean");
+            if (std.mem.eql(u8, ref, "char")) return allocator.dupe(u8, "char");
+            if (std.mem.eql(u8, ref, "String")) return allocator.dupe(u8, "String");
+            if (std.mem.eql(u8, ref, "c_string")) return allocator.dupe(u8, "c_string");
+            if (std.mem.eql(u8, ref, "void")) return allocator.dupe(u8, "void");
+            return allocator.dupe(u8, ref); // struct/enum name — will be looked up in registry
         },
         .generic => |g| {
-            if (std.mem.eql(u8, g.name, "Pointer")) return "pointer";
-            return g.name; // other generic struct names
+            if (std.mem.eql(u8, g.name, "Pointer")) return allocator.dupe(u8, "pointer");
+
+            const typeArgNames = try allocator.alloc([]const u8, g.type_args.len);
+            defer {
+                for (typeArgNames) |name| allocator.free(name);
+                allocator.free(typeArgNames);
+            }
+            for (g.type_args, 0..) |arg, i| {
+                typeArgNames[i] = try resolveFieldTypeName(allocator, arg);
+            }
+            return computeMangledName(allocator, g.name, typeArgNames);
         },
-        .array => "pointer", // arrays as pointers
-        .fn_type => "function",
+        .array => allocator.dupe(u8, "pointer"), // arrays as pointers
+        .fn_type => allocator.dupe(u8, "function"),
     };
 }
 
@@ -59,9 +69,14 @@ fn buildStructFieldTypes(
             if (!result.contains(entry.key_ptr.*)) {
                 const sd = entry.value_ptr.*;
                 const fieldTypes = try allocator.alloc([]const u8, sd.fields.len);
-                errdefer allocator.free(fieldTypes);
+                var init_count: usize = 0;
+                errdefer {
+                    for (fieldTypes[0..init_count]) |fieldType| allocator.free(fieldType);
+                    allocator.free(fieldTypes);
+                }
                 for (sd.fields, 0..) |field, i| {
-                    fieldTypes[i] = resolveFieldTypeName(field.type);
+                    fieldTypes[i] = try resolveFieldTypeName(allocator, field.type);
+                    init_count = i + 1;
                 }
                 try result.put(entry.key_ptr.*, fieldTypes);
             }
@@ -73,9 +88,14 @@ fn buildStructFieldTypes(
         if (!result.contains(entry.key_ptr.*)) {
             const sd = entry.value_ptr.*;
             const fieldTypes = try allocator.alloc([]const u8, sd.fields.len);
-            errdefer allocator.free(fieldTypes);
+            var init_count: usize = 0;
+            errdefer {
+                for (fieldTypes[0..init_count]) |fieldType| allocator.free(fieldType);
+                allocator.free(fieldTypes);
+            }
             for (sd.fields, 0..) |field, i| {
-                fieldTypes[i] = resolveFieldTypeName(field.type);
+                fieldTypes[i] = try resolveFieldTypeName(allocator, field.type);
+                init_count = i + 1;
             }
             try result.put(entry.key_ptr.*, fieldTypes);
         }
@@ -220,6 +240,8 @@ fn compileModule(self: *Self, path: []const u8) !CompiledModule {
         .matchEnumNames = &analyzeResult.matchEnumNames,
         .extensionCalls = &analyzeResult.extensionCalls,
         .lambdaNames = &analyzeResult.lambdaNames,
+        .lambdaTypes = &analyzeResult.lambdaTypes,
+        .safeNavInfo = &analyzeResult.safeNavInfo,
     });
 
     const compiled = CompiledModule{
@@ -265,33 +287,41 @@ fn mergeIr(
 
 /// Find the prelude.zs path relative to the compiler executable.
 fn findPreludePath(allocator: std.mem.Allocator) !?[]const u8 {
+    // Try CWD first so workspace builds use the source stdlib rather than zig-out copies.
+    const cwdCandidates = [_][]const u8{ "stdlib/prelude.chisa", "stdlib/prelude.zs" };
+    for (cwdCandidates) |candidatePath| {
+        const cwdCandidate = try allocator.dupe(u8, candidatePath);
+        if (std.fs.cwd().access(cwdCandidate, .{})) |_| {
+            return cwdCandidate;
+        } else |_| {
+            allocator.free(cwdCandidate);
+        }
+    }
+
     // Try relative to executable
     var buf: [4096]u8 = undefined;
     if (std.fs.selfExePath(&buf)) |ep| {
         const exeDir = std.fs.path.dirname(ep) orelse ".";
-        const candidate = try std.fs.path.join(allocator, &.{ exeDir, "stdlib", "prelude.zs" });
-        if (std.fs.cwd().access(candidate, .{})) |_| {
-            return candidate;
-        } else |_| {
-            allocator.free(candidate);
+        const exeCandidates = [_][]const u8{ "prelude.chisa", "prelude.zs" };
+        for (exeCandidates) |preludeName| {
+            const candidate = try std.fs.path.join(allocator, &.{ exeDir, "stdlib", preludeName });
+            if (std.fs.cwd().access(candidate, .{})) |_| {
+                return candidate;
+            } else |_| {
+                allocator.free(candidate);
+            }
         }
         // Try one level up (zig-out/bin/../stdlib)
         const parentDir = std.fs.path.dirname(exeDir) orelse ".";
-        const candidate2 = try std.fs.path.join(allocator, &.{ parentDir, "stdlib", "prelude.zs" });
-        if (std.fs.cwd().access(candidate2, .{})) |_| {
-            return candidate2;
-        } else |_| {
-            allocator.free(candidate2);
+        for (exeCandidates) |preludeName| {
+            const candidate = try std.fs.path.join(allocator, &.{ parentDir, "stdlib", preludeName });
+            if (std.fs.cwd().access(candidate, .{})) |_| {
+                return candidate;
+            } else |_| {
+                allocator.free(candidate);
+            }
         }
     } else |_| {}
-
-    // Try CWD
-    const cwdCandidate = try allocator.dupe(u8, "stdlib/prelude.zs");
-    if (std.fs.cwd().access(cwdCandidate, .{})) |_| {
-        return cwdCandidate;
-    } else |_| {
-        allocator.free(cwdCandidate);
-    }
 
     return null;
 }
@@ -313,7 +343,7 @@ pub fn compile(self: *Self, args: Args.ExecutionArgs) !void {
 
     const tokenizer = Tokenizer.create(buffer);
 
-    std.debug.print("Parsing\n", .{});
+    if (args.verbose) std.debug.print("Parsing\n", .{});
     var parser = try Parser.create(
         allocator,
         tokenizer,
@@ -397,7 +427,7 @@ pub fn compile(self: *Self, args: Args.ExecutionArgs) !void {
             preludeExports = &cachedPrelude.analyzeResult.exports;
             preludeOverloads = &cachedPrelude.analyzeResult.overloads;
             preludeStructDefs = &cachedPrelude.analyzeResult.exportedStructDefs;
-            preludeEnumDefs = &cachedPrelude.analyzeResult.exportedEnumDefs;
+            preludeEnumDefs = &cachedPrelude.analyzeResult.enumDefs;
             preludeGenericFns = &cachedPrelude.analyzeResult.genericFns;
             preludeScalarDefs = &cachedPrelude.analyzeResult.scalarDefs;
 
@@ -413,7 +443,7 @@ pub fn compile(self: *Self, args: Args.ExecutionArgs) !void {
         }
     }
 
-    std.debug.print("Analyzing\n", .{});
+    if (args.verbose) std.debug.print("Analyzing\n", .{});
 
     var analyzeResult = try Analyzer.analyzeWithPrelude(module, allocator, &depAnalyzeResults, preludeExports, preludeOverloads, preludeStructDefs, preludeEnumDefs, preludeGenericFns, preludeScalarDefs);
     defer analyzeResult.deinit(allocator);
@@ -421,8 +451,14 @@ pub fn compile(self: *Self, args: Args.ExecutionArgs) !void {
     for (analyzeResult.errors) |e| {
         std.debug.print("{f}\n", .{e});
     }
+
+    // Dump symbols as JSON if requested
+    if (args.dumpSymbols) {
+        try dump_symbols.dump(allocator, analyzeResult);
+    }
+
     if (analyzeResult.errors.len == 0) {
-        std.debug.print("Generating ir\n", .{});
+        if (args.verbose) std.debug.print("Generating ir\n", .{});
         var entryIrResult = try IRGen.generate(.{
             .module = &module,
             .allocator = allocator,
@@ -440,6 +476,8 @@ pub fn compile(self: *Self, args: Args.ExecutionArgs) !void {
             .matchEnumNames = &analyzeResult.matchEnumNames,
             .extensionCalls = &analyzeResult.extensionCalls,
             .lambdaNames = &analyzeResult.lambdaNames,
+            .lambdaTypes = &analyzeResult.lambdaTypes,
+            .safeNavInfo = &analyzeResult.safeNavInfo,
         });
         defer entryIrResult.deinit(allocator);
 
@@ -449,7 +487,7 @@ pub fn compile(self: *Self, args: Args.ExecutionArgs) !void {
         defer allocator.free(mergedIr.instructions);
 
         if (args.dumpIr or args.run or args.outputPath != null) {
-            std.debug.print("Generating llvm\n", .{});
+            if (args.verbose) std.debug.print("Generating llvm\n", .{});
 
             // Build struct field types map from all struct defs
             var depStructDefPtrs = try std.ArrayList(*const std.StringHashMap(Analyzer.StructDef)).initCapacity(allocator, depCompiled.items.len);
@@ -462,6 +500,7 @@ pub fn compile(self: *Self, args: Args.ExecutionArgs) !void {
             defer {
                 var sfIter = structFieldTypes.iterator();
                 while (sfIter.next()) |entry| {
+                    for (entry.value_ptr.*) |fieldType| allocator.free(fieldType);
                     allocator.free(entry.value_ptr.*);
                 }
                 structFieldTypes.deinit();
@@ -517,30 +556,51 @@ pub fn compile(self: *Self, args: Args.ExecutionArgs) !void {
 
                 std.debug.print("Compiled to {s}\n", .{outputPath});
             } else if (args.run) {
-                std.debug.print("Running\n", .{});
-                engine.LLVMLinkInMCJIT();
+                if (args.verbose) std.debug.print("Running\n", .{});
+                llvm.generateMain(llvmModule);
 
-                var ee: llvm_lib.types.LLVMExecutionEngineRef = null;
-                var err: [*c]u8 = null;
-                const result = engine.LLVMCreateExecutionEngineForModule(&ee, llvmModule, &err);
-                if (result != 0) {
-                    if (err) |errMsg| {
-                        std.debug.print("MCJIT error: {s}\n", .{errMsg});
-                        core.LLVMDisposeMessage(errMsg);
-                    }
-                    core.LLVMDisposeModule(llvmModule);
+                const tmpObjPath = "/tmp/zs_run_output.o";
+                const tmpExePath = "/tmp/zs_run_output";
+                try llvm.emitObjectFile(llvmModule, tmpObjPath);
+                core.LLVMDisposeModule(llvmModule);
+                defer std.fs.cwd().deleteFile(tmpObjPath) catch {};
+                defer std.fs.cwd().deleteFile(tmpExePath) catch {};
+
+                const ccResult = try std.process.Child.run(.{
+                    .allocator = allocator,
+                    .argv = &.{ "zig", "cc", "-o", tmpExePath, tmpObjPath, "-ldl" },
+                });
+                defer allocator.free(ccResult.stdout);
+                defer allocator.free(ccResult.stderr);
+
+                const linkFailed = switch (ccResult.term) {
+                    .Exited => |code| code != 0,
+                    else => true,
+                };
+                if (linkFailed) {
+                    std.debug.print("Linker error:\n{s}\n", .{ccResult.stderr});
                     return;
                 }
 
-                const initFn = core.LLVMGetNamedFunction(llvmModule, "init");
-                if (initFn == null) {
-                    std.debug.print("Error: 'init' function not found in module\n", .{});
-                    engine.LLVMDisposeExecutionEngine(ee);
-                    return;
-                }
+                const entryDirPath = std.fs.path.dirname(args.entryPoint) orelse ".";
+                const runResult = try std.process.Child.run(.{
+                    .allocator = allocator,
+                    .argv = &.{ tmpExePath },
+                    .cwd = entryDirPath,
+                });
+                defer allocator.free(runResult.stdout);
+                defer allocator.free(runResult.stderr);
 
-                _ = engine.LLVMRunFunction(ee, initFn, 0, null);
-                engine.LLVMDisposeExecutionEngine(ee);
+                const stdout = std.fs.File.stdout();
+                const stderr = std.fs.File.stderr();
+                if (runResult.stdout.len > 0) try stdout.writeAll(runResult.stdout);
+                if (runResult.stderr.len > 0) try stderr.writeAll(runResult.stderr);
+
+                const runFailed = switch (runResult.term) {
+                    .Exited => |code| code != 0,
+                    else => true,
+                };
+                if (runFailed) return;
             } else {
                 core.LLVMDisposeModule(llvmModule);
             }

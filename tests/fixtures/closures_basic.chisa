@@ -1,0 +1,5 @@
+fn makeCounter(): (number) -> number {
+    let count = 0
+    let inc = { x: number -> count = count + x }
+    return inc
+}

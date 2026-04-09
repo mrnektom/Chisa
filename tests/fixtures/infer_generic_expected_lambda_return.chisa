@@ -1,0 +1,8 @@
+import { Option } from "../../stdlib/Option.chisa"
+
+fn makeDefault<T>(f: () -> T): T = f()
+
+let value: Option<number> = makeDefault { -> Option.None }
+let result = value.getOrElse(5)
+
+print(result)
