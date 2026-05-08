@@ -11,3 +11,4 @@ intellij-plugin/.gradle
 intellij-plugin/.intellijPlatform
 **/.omc
 .claude
+/intellij-plugin/.gradle/
