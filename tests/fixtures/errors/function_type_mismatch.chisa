@@ -1,0 +1,5 @@
+type NumToNum = (number) -> number
+type BoolToBool = (boolean) -> boolean
+
+let f: NumToNum = { n -> n + 1 }
+let g: BoolToBool = f

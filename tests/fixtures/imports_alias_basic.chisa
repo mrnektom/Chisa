@@ -1,0 +1,4 @@
+import { add as sum, version as currentVersion } from "./imports_alias_lib.chisa"
+
+let result = sum(currentVersion, 2)
+print(result)

@@ -1,0 +1,8 @@
+import { Either } from "../../stdlib/Either.chisa"
+import { Option } from "../../stdlib/Option.chisa"
+
+let a = Option.Some(42)
+let b: Option<number> = Option.None
+print(a.getOrElse(0))
+print(b.getOrElse(0))
+

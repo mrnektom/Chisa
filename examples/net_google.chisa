@@ -1,0 +1,16 @@
+import { Either } from "../stdlib/Either.chisa"
+import { Unit } from "../stdlib/Unit.chisa"
+import { httpGet, NetError } from "../stdlib/io/net.chisa"
+
+fn fetchGoogle(): Either<NetError, Unit> {
+  let body = httpGet("google.com", "/")!!
+  print(body)
+  return Either.Right(Unit {})
+}
+
+let result = fetchGoogle()
+
+match result {
+  Either.Right(_) -> print(""),
+  Either.Left(err) -> print(err.toString())
+}

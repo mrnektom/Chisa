@@ -8,16 +8,14 @@ const use_unix_socket = builtin.os.tag != .windows;
 const unix_socket_path = "/tmp/zs-daemon.sock";
 const default_tcp_port: u16 = 7654;
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const io = init.io;
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
 
     var stdlib_path: ?[]const u8 = null;
     var tcp_port: u16 = default_tcp_port;
+    var check_file: ?[]const u8 = null;
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
         if (std.mem.eql(u8, args[i], "--stdlib") and i + 1 < args.len) {
@@ -26,27 +24,66 @@ pub fn main() !void {
         } else if (std.mem.eql(u8, args[i], "--port") and i + 1 < args.len) {
             i += 1;
             tcp_port = std.fmt.parseInt(u16, args[i], 10) catch default_tcp_port;
+        } else if (std.mem.eql(u8, args[i], "--check-file") and i + 1 < args.len) {
+            i += 1;
+            check_file = args[i];
         }
     }
 
     const ctx = handler.Context{ .stdlib_path = stdlib_path };
 
+    if (check_file) |path| {
+        try runOneShotCheck(allocator, io, path, ctx);
+        return;
+    }
+
     if (use_unix_socket) {
-        try runServer(allocator, try std.net.Address.initUnix(unix_socket_path), true, ctx);
+        const addr = try std.Io.net.UnixAddress.init(unix_socket_path);
+        try runServer(allocator, io, addr, true, ctx);
     } else {
-        try runServer(allocator, try std.net.Address.parseIp4("127.0.0.1", tcp_port), false, ctx);
+        const addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", tcp_port);
+        try runServer(allocator, io, addr, false, ctx);
     }
 }
 
-fn runServer(allocator: std.mem.Allocator, addr: std.net.Address, is_unix: bool, ctx: handler.Context) !void {
+fn runOneShotCheck(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    path: []const u8,
+    ctx: handler.Context,
+) !void {
+    const content = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(16 * 1024 * 1024));
+    defer allocator.free(content);
+
+    const req = protocol.Request{
+        .id = 1,
+        .method = "check",
+        .file = path,
+        .content = content,
+        .offset = null,
+    };
+
+    const resp = handler.dispatch(allocator, req, ctx);
+    defer allocator.free(resp);
+
+    try std.Io.File.stdout().writeStreamingAll(io, resp);
+}
+
+fn runServer(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    addr: anytype,
+    is_unix: bool,
+    ctx: handler.Context,
+) !void {
     if (is_unix) {
-        std.fs.deleteFileAbsolute(unix_socket_path) catch {};
+        std.Io.Dir.deleteFileAbsolute(io, unix_socket_path) catch {};
     }
 
-    var server = try addr.listen(.{ .reuse_address = true });
+    var server = try addr.listen(io, .{});
     defer {
-        server.deinit();
-        if (is_unix) std.fs.deleteFileAbsolute(unix_socket_path) catch {};
+        server.deinit(io);
+        if (is_unix) std.Io.Dir.deleteFileAbsolute(io, unix_socket_path) catch {};
     }
 
     if (is_unix) {
@@ -56,76 +93,56 @@ fn runServer(allocator: std.mem.Allocator, addr: std.net.Address, is_unix: bool,
     }
 
     while (true) {
-        const conn = server.accept() catch |err| {
+        var conn = server.accept(io) catch |err| {
             std.debug.print("accept error: {s}\n", .{@errorName(err)});
             continue;
         };
         std.debug.print("client connected\n", .{});
-        handleConnection(allocator, conn.stream, ctx) catch |err| {
+        handleConnection(allocator, io, conn, ctx) catch |err| {
             std.debug.print("connection error: {s}\n", .{@errorName(err)});
         };
-        conn.stream.close();
+        conn.close(io);
         std.debug.print("client disconnected\n", .{});
     }
 }
 
 // ─── Connection handler ───────────────────────────────────────────────────────
 
-/// Buffer size for reading from the socket. A single JSON request (including
-/// base64/escaped file content) must fit in this limit.
-const read_buf_size = 4 * 1024 * 1024; // 4 MB
-
-fn handleConnection(allocator: std.mem.Allocator, stream: std.net.Stream, ctx: handler.Context) !void {
-    const read_buf = try allocator.alloc(u8, read_buf_size);
-    defer allocator.free(read_buf);
-
-    var rb_start: usize = 0;
-    var rb_end: usize = 0;
-
-    var line_buf: std.ArrayList(u8) = .empty;
-    defer line_buf.deinit(allocator);
-
+fn handleConnection(allocator: std.mem.Allocator, io: std.Io, stream: std.Io.net.Stream, ctx: handler.Context) !void {
+    const reader_buf = try allocator.alloc(u8, 4 * 1024 * 1024);
+    defer allocator.free(reader_buf);
+    var reader = stream.reader(io, reader_buf);
     while (true) {
-        if (rb_start >= rb_end) {
-            const n = try stream.read(read_buf);
-            if (n == 0) return; // peer closed
-            rb_start = 0;
-            rb_end = n;
-        }
-
-        const chunk = read_buf[rb_start..rb_end];
-
-        if (std.mem.indexOfScalar(u8, chunk, '\n')) |nl| {
-            try line_buf.appendSlice(allocator, chunk[0..nl]);
-            rb_start += nl + 1;
-
-            const line = std.mem.trim(u8, line_buf.items, " \r\t");
-            if (line.len > 0) {
-                processLine(allocator, stream, line, ctx) catch |err| {
-                    std.debug.print("processLine error: {s}\n", .{@errorName(err)});
-                    return;
-                };
-            }
-            line_buf.clearRetainingCapacity();
-        } else {
-            try line_buf.appendSlice(allocator, chunk);
-            rb_start = rb_end;
-        }
+        const line = reader.interface.takeDelimiter('\n') catch |err| switch (err) {
+            error.ReadFailed, error.StreamTooLong => return err,
+        } orelse return;
+        const trimmed = std.mem.trim(u8, line, " \r\t");
+        if (trimmed.len == 0) continue;
+        processLine(allocator, io, stream, trimmed, ctx) catch |err| {
+            std.debug.print("processLine error: {s}\n", .{@errorName(err)});
+            return;
+        };
     }
 }
 
-fn processLine(allocator: std.mem.Allocator, stream: std.net.Stream, line: []const u8, ctx: handler.Context) !void {
+fn processLine(allocator: std.mem.Allocator, io: std.Io, stream: std.Io.net.Stream, line: []const u8, ctx: handler.Context) !void {
     const parsed = protocol.parseRequest(allocator, line) catch |err| {
         std.debug.print("parse error: {s}\n", .{@errorName(err)});
         const resp = try protocol.buildErrorResponse(allocator, 0, "invalid JSON request");
         defer allocator.free(resp);
-        return stream.writeAll(resp);
+        var buffer: [4096]u8 = undefined;
+        var writer = stream.writer(io, &buffer);
+        try writer.interface.writeAll(resp);
+        try writer.interface.flush();
+        return;
     };
     defer parsed.deinit();
 
     const resp = handler.dispatch(allocator, parsed.value, ctx);
     defer allocator.free(resp);
 
-    try stream.writeAll(resp);
+    var buffer: [4096]u8 = undefined;
+    var writer = stream.writer(io, &buffer);
+    try writer.interface.writeAll(resp);
+    try writer.interface.flush();
 }
-

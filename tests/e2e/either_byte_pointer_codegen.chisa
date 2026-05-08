@@ -1,0 +1,26 @@
+import { Either } from "../../stdlib/Either.chisa"
+import { String } from "../../stdlib/String.chisa"
+import { Unit } from "../../stdlib/Unit.chisa"
+import { alloc } from "../../stdlib/mem.chisa"
+
+enum NetLikeError {
+    Failed,
+}
+
+fn producePtr(): Either<NetLikeError, Pointer<byte>> {
+    let buf: Pointer<byte> = alloc(4)
+    buf[0] = 65
+    buf[1] = 66
+    buf[2] = 67
+    buf[3] = 0
+    return Either.Right(buf)
+}
+
+fn consumePtr(): Either<NetLikeError, Unit> {
+    let ptr = producePtr()!!
+    let text = String { len: 3, data: ptr }
+    print(text)
+    return Either.Right(Unit {})
+}
+
+consumePtr()

@@ -1,0 +1,3 @@
+fn msg(): String = "hello"
+
+print(msg())

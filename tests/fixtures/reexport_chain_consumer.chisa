@@ -1,0 +1,4 @@
+import { bump, seed as start } from "./reexport_chain_mid.chisa"
+
+let result = bump(start)
+print(result)

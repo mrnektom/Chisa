@@ -1,0 +1,13 @@
+import { httpGet, httpGetIpv4, readAll, resolveIpv4, sendAll, tcpConnect, tcpConnectIpv4, closeSocket } from "../../stdlib/io/net.chisa"
+
+fn compileOnly(): number {
+  let _ = resolveIpv4("google.com")
+  let _2 = tcpConnectIpv4(127, 0, 0, 1, 80)
+  let _3 = tcpConnect("google.com", 80)
+  let _4 = sendAll(0, "GET / HTTP/1.0\r\n\r\n")
+  let _5 = readAll(0, 1024)
+  closeSocket(0)
+  let _6 = httpGetIpv4("google.com", 142, 250, 186, 174, "/")
+  let _7 = httpGet("google.com", "/")
+  return 0
+}

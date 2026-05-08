@@ -20,6 +20,10 @@ import org.chisa.intellij.psi.*
 import org.chisa.intellij.reference.ChisaResolveUtil
 
 class ChisaCompletionContributor : CompletionContributor() {
+    override fun handleAutoCompletionPossibility(context: AutoCompletionContext): AutoCompletionDecision {
+        return AutoCompletionDecision.SHOW_LOOKUP
+    }
+
     init {
         // 4a. Identifier completion in expressions
         extend(
@@ -127,9 +131,16 @@ class ChisaCompletionContributor : CompletionContributor() {
 
         // 4a. Identifier completions
         private fun addIdentifierCompletions(position: PsiElement, result: CompletionResultSet) {
-            val variants = ChisaResolveUtil.collectVariantElements(position)
-            for (element in variants) {
+            val variants = LinkedHashMap<String, ChisaNamedElement>()
+            for (element in ChisaResolveUtil.collectVariantElements(position)) {
                 val name = element.name ?: continue
+                variants.putIfAbsent(name, element)
+            }
+            for (element in ChisaResolveUtil.collectPreludeVisibleElements(position.project)) {
+                val name = element.name ?: continue
+                variants.putIfAbsent(name, element)
+            }
+            for ((name, element) in variants) {
                 val lookup = when (element) {
                     is ChisaFnDeclaration -> LookupElementBuilder.create(name)
                         .withIcon(AllIcons.Nodes.Function)
@@ -174,9 +185,16 @@ class ChisaCompletionContributor : CompletionContributor() {
                 result.addElement(lookup)
             }
             // Add user-defined types (structs and enums)
-            val variants = ChisaResolveUtil.collectVariantElements(position)
-            for (element in variants) {
+            val variants = LinkedHashMap<String, ChisaNamedElement>()
+            for (element in ChisaResolveUtil.collectVariantElements(position)) {
                 val name = element.name ?: continue
+                variants.putIfAbsent(name, element)
+            }
+            for (element in ChisaResolveUtil.collectPreludeVisibleElements(position.project)) {
+                val name = element.name ?: continue
+                variants.putIfAbsent(name, element)
+            }
+            for ((name, element) in variants) {
                 val lookup = when (element) {
                     is ChisaStructDeclaration -> LookupElementBuilder.create(name)
                         .withIcon(AllIcons.Nodes.Class)
@@ -240,7 +258,6 @@ class ChisaCompletionContributor : CompletionContributor() {
                 is ChisaReferenceExpression -> beforeDotPsi.reference.resolve()
                 else -> null
             }
-
             when (resolved) {
                 is ChisaEnumDeclaration -> {
                     for (variant in ChisaResolveUtil.collectEnumVariants(resolved)) {
@@ -263,7 +280,10 @@ class ChisaCompletionContributor : CompletionContributor() {
                 is ChisaVarDeclaration, is ChisaParameter -> {
                     // Resolve the type via the type reference's own reference
                     val typeRef = PsiTreeUtil.findChildOfType(resolved, ChisaTypeReferenceElement::class.java)
-                    val typeDecl = typeRef?.reference?.resolve()
+                    val typeDecl = ChisaResolveUtil.dereferenceImportedElement(typeRef?.reference?.resolve())
+                        ?: typeRef?.getReferenceName()?.let { typeName ->
+                            ChisaResolveUtil.resolveViaImports(typeRef.containingFile, typeName)
+                        }
                     if (typeDecl is ChisaStructDeclaration) {
                         for (field in ChisaResolveUtil.collectStructFields(typeDecl)) {
                             val name = field.name ?: continue

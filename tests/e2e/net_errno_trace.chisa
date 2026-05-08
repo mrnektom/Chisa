@@ -1,0 +1,9 @@
+import { Either } from "../../stdlib/Either.chisa"
+import { tcpConnectIpv4 } from "../../stdlib/io/net.chisa"
+
+let result = tcpConnectIpv4(142, 250, 186, 174, 80)
+
+match result {
+  Either.Right(_) -> print("ok"),
+  Either.Left(err) -> print(err.toString())
+}

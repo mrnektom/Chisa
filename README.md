@@ -14,11 +14,66 @@ zig build test                     # Run all tests
 
 Requires Zig >= 0.15.2.
 
+## `zs-daemon`
+
+`zs-daemon` is the long-running analysis server used by the IntelliJ plugin for diagnostics, completions, and hover.
+
+Build it with the normal project build:
+
+```bash
+zig build
+```
+
+Run it from the repository root so it can resolve the standard library:
+
+```bash
+./zig-out/bin/zs-daemon --stdlib stdlib
+```
+
+For a single analysis run that prints the JSON diagnostics to stdout and exits:
+
+```bash
+./zig-out/bin/zs-daemon --stdlib stdlib --check-file examples/net_google.chisa
+```
+
+Transport:
+
+- Linux/macOS: Unix domain socket at `/tmp/zs-daemon.sock`
+- Windows: TCP on `127.0.0.1:7654`
+- Optional Windows port override: `./zig-out/bin/zs-daemon --stdlib stdlib --port 7654`
+
+The daemon accepts one JSON request per line and replies with one JSON line.
+
+Example `check` request:
+
+```json
+{"id":1,"method":"check","file":"/absolute/path/to/file.chisa","content":"print(\"hello\")\n"}
+```
+
+Supported methods:
+
+- `check` returns `diagnostics`
+- `complete` requires `offset` and returns `completions`
+- `hover` requires `offset` and returns `type`
+
+Example response:
+
+```json
+{"id":1,"diagnostics":[]}
+```
+
+### IntelliJ plugin setup
+
+1. Build the project with `zig build`.
+2. In the plugin settings, set `Daemon path` to `zig-out/bin/zs-daemon`.
+3. On Windows, set `Daemon TCP port` if you are not using the default `7654`.
+4. Open a `.chisa` file. The plugin starts the daemon on first use.
+
 ## Basic syntax
 
 ### Variables
 
-```zs
+```chisa
 let x = 10        // mutable variable
 const y = 42      // immutable constant
 x = 50            // reassignment (only for let)
@@ -26,7 +81,7 @@ x = 50            // reassignment (only for let)
 
 ### Functions
 
-```zs
+```chisa
 // Expression body
 fn get_ten(): number = 10
 
@@ -49,15 +104,15 @@ Supported types: `number` (i32), `long` (i64), `int` (alias for number), `short`
 
 Type annotations are used on function arguments and return types:
 
-```zs
+```chisa
 fn check(x: number): boolean = true
 fn greet(name: String): void = print(name)
-fn first(arr: [number]): number = arr[0]
+fn first(arr: number[]): number = arr[0]
 ```
 
 ### Structs
 
-```zs
+```chisa
 struct Point { x: number, y: number }
 
 // Generic structs
@@ -73,7 +128,7 @@ export struct String { len: number, data: Pointer<number> }
 
 ### Enums and match
 
-```zs
+```chisa
 enum Option {
   Some(number),
   None
@@ -96,7 +151,7 @@ Enums are tagged unions (`{ i32 tag, payload }`). Match expressions require exha
 
 ### Pointers
 
-```zs
+```chisa
 let px = ptr(val)      // create a pointer
 let v = deref(px)      // dereference a pointer
 ```
@@ -105,7 +160,7 @@ Generic pointer type annotation: `Pointer<number>`.
 
 Pointer indexing (byte-level access):
 
-```zs
+```chisa
 let buf = alloc(10)
 buf[0] = 'h'            // write byte at offset
 let c = buf[0]           // read byte at offset
@@ -115,7 +170,7 @@ let c = buf[0]           // read byte at offset
 
 ### Char
 
-```zs
+```chisa
 let c = 'a'
 let newline = '\n'
 let zero = '\0'
@@ -125,7 +180,7 @@ Char is an 8-bit value (`i8` in LLVM). Supported escapes: `\n`, `\t`, `\r`, `\\`
 
 ### Arrays
 
-```zs
+```chisa
 let arr = [1, 2, 3]
 let first = arr[0]       // index access
 arr[1] = 42              // indexed assignment (let only)
@@ -142,7 +197,7 @@ Arrays are fixed-size and stack-allocated (`alloca [N x T]` in LLVM). Array type
 
 ### Expressions
 
-```zs
+```chisa 
 // Literals
 42
 "hello"
@@ -213,7 +268,7 @@ return
 
 ### Imports and exports
 
-```zs
+```chisa
 // lib.zs
 export fn get_ten(): number = 10
 export let x = 42
@@ -226,7 +281,7 @@ print(get_ten())
 
 Re-export symbols from another module:
 
-```zs
+```chisa
 // prelude.zs
 export { String } from "./string.zs"
 export fn print(s: String): void { ... }

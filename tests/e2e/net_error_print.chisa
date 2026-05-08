@@ -1,0 +1,3 @@
+import { NetError } from "../../stdlib/io/net.chisa"
+
+print(NetError.ConnectFailed(111).toString())

@@ -1,0 +1,16 @@
+import { Either } from "../../stdlib/Either.chisa"
+import { Unit } from "../../stdlib/Unit.chisa"
+import { String } from "../../stdlib/String.chisa"
+
+fn produce(flag: boolean): Either<number, String> {
+    if (flag) return Either.Right("hello")
+    return Either.Left(1)
+}
+
+fn consume(flag: boolean): Either<number, Unit> {
+    let body = produce(flag)!!
+    print(body)
+    return Either.Right(Unit {})
+}
+
+consume(true)

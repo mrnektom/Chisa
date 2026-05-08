@@ -43,6 +43,13 @@ pub fn isArithmeticType(t: Symbol.ZSTypeNotation) bool {
     };
 }
 
+pub fn isPrimitiveScalarType(t: Symbol.ZSTypeNotation) bool {
+    return switch (t) {
+        .number, .boolean, .char, .long, .short, .byte => true,
+        else => false,
+    };
+}
+
 pub const builtinScalars = .{
     .{ "number", Symbol.ZSTypeNotation.number },
     .{ "int", Symbol.ZSTypeNotation.number },
@@ -62,15 +69,14 @@ pub fn typesCompatible(dst: Symbol.ZSTypeNotation, src: Symbol.ZSTypeNotation) b
     const dstTag: ZSTType = dst;
     const srcTag: ZSTType = src;
     if (dstTag == srcTag) {
-        // For enum types, also check the name matches
-        if (dstTag == .enum_type) {
-            return std.mem.eql(u8, dst.enum_type.name, src.enum_type.name);
-        }
-        // For struct types, check name matches
-        if (dstTag == .struct_type) {
-            return std.mem.eql(u8, dst.struct_type.name, src.struct_type.name);
-        }
-        return true;
+        return switch (dstTag) {
+            .enum_type => enumTypesCompatible(dst.enum_type, src.enum_type),
+            .struct_type => structTypesCompatible(dst.struct_type, src.struct_type),
+            .pointer => typesCompatible(dst.pointer.*, src.pointer.*),
+            .array_type => typesCompatible(dst.array_type.element_type.*, src.array_type.element_type.*),
+            .function => functionTypesCompatible(dst.function, src.function),
+            else => true,
+        };
     }
     // number/short/byte/long are all integer-compatible
     const intTypes = [_]ZSTType{ .number, .long, .short, .byte };
@@ -82,6 +88,32 @@ pub fn typesCompatible(dst: Symbol.ZSTypeNotation, src: Symbol.ZSTypeNotation) b
     }
     if (dstIsInt and srcIsInt) return true;
     return false;
+}
+
+fn functionTypesCompatible(dst: sig.ZSFunction, src: sig.ZSFunction) bool {
+    if (dst.args.len != src.args.len) return false;
+    for (dst.args, src.args) |dstArg, srcArg| {
+        if (!typesCompatible(dstArg.type, srcArg.type)) return false;
+    }
+    return typesCompatible(dst.ret.*, src.ret.*);
+}
+
+fn structTypesCompatible(dst: sig.ZSStructType, src: sig.ZSStructType) bool {
+    if (!std.mem.eql(u8, dst.name, src.name)) return false;
+    return typeArgsCompatible(dst.type_args, src.type_args);
+}
+
+fn enumTypesCompatible(dst: sig.ZSEnumType, src: sig.ZSEnumType) bool {
+    if (!std.mem.eql(u8, dst.name, src.name)) return false;
+    return typeArgsCompatible(dst.type_args, src.type_args);
+}
+
+fn typeArgsCompatible(dst: []const Symbol.ZSTypeNotation, src: []const Symbol.ZSTypeNotation) bool {
+    if (dst.len != src.len) return false;
+    for (dst, src) |dstArg, srcArg| {
+        if (!typesCompatible(dstArg, srcArg)) return false;
+    }
+    return true;
 }
 
 pub fn resolveTypeAnnotationFull(self: anytype, astType: ast.ZSTypeNotation) Error!Symbol.ZSTypeNotation {
@@ -160,6 +192,14 @@ pub fn resolveTypeAnnotationFull(self: anytype, astType: ast.ZSTypeNotation) Err
             return Symbol.ZSTypeNotation{ .function = .{ .ret = retPtr, .args = args } };
         },
         .generic => |g| {
+            // Pointer<T> is represented as ZSTypeNotation.pointer, not as a struct or alias.
+            if (std.mem.eql(u8, g.name, "Pointer") and g.type_args.len == 1) {
+                const innerType = try resolveTypeAnnotationFull(self, g.type_args[0]);
+                const innerPtr = try self.allocator.create(Symbol.ZSTypeNotation);
+                innerPtr.* = innerType;
+                try self.allocatedTypes.append(self.allocator, innerPtr);
+                return Symbol.ZSTypeNotation{ .pointer = innerPtr };
+            }
             // Check type aliases for generic types
             if (self.typeAliases.get(g.name)) |alias| {
                 if (alias.type_params.len == g.type_args.len) {
@@ -172,14 +212,6 @@ pub fn resolveTypeAnnotationFull(self: anytype, astType: ast.ZSTypeNotation) Err
                     const substituted = try substituteAstType(self, alias.aliased_type, alias.type_params, bindingStrs);
                     return try resolveTypeAnnotationFull(self, substituted);
                 }
-            }
-            // Pointer<T> is represented as ZSTypeNotation.pointer, not as a struct
-            if (std.mem.eql(u8, g.name, "Pointer") and g.type_args.len == 1) {
-                const innerType = try resolveTypeAnnotationFull(self, g.type_args[0]);
-                const innerPtr = try self.allocator.create(Symbol.ZSTypeNotation);
-                innerPtr.* = innerType;
-                try self.allocatedTypes.append(self.allocator, innerPtr);
-                return Symbol.ZSTypeNotation{ .pointer = innerPtr };
             }
             // Check for generic struct
             if (self.structDefs.get(g.name)) |sd| {

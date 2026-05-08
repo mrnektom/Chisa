@@ -4,12 +4,26 @@ const Pipeline = @import("pipeline.zig");
 const Args = @import("args/args.zig");
 
 fn compileFile(path: []const u8) !void {
-    var p = try Pipeline.init(testing.allocator);
+    var p = try Pipeline.init(testing.allocator, testing.io);
     defer p.deinit();
     try p.compile(.{
         .entryPoint = path,
         .dumpIr = false,
         .outputPath = null,
+        .run = false,
+        .debug = false,
+    });
+}
+
+fn compileFileToNative(path: []const u8) !void {
+    const output_path = "/tmp/chisa_codegen_test_output";
+
+    var p = try Pipeline.init(testing.allocator, testing.io);
+    defer p.deinit();
+    try p.compile(.{
+        .entryPoint = path,
+        .dumpIr = false,
+        .outputPath = output_path,
         .run = false,
         .debug = false,
     });
@@ -170,12 +184,56 @@ test "scalars: scalar types as annotations" {
     try compileFile("tests/fixtures/scalars_decl.chisa");
 }
 
+test "casts: primitive as coercions compile to native" {
+    try compileFileToNative("tests/fixtures/primitives_as_cast.chisa");
+}
+
 test "type alias: basic declaration" {
     try compileFile("tests/fixtures/type_alias.chisa");
 }
 
 test "imports: import from another file" {
     try compileFile("tests/fixtures/imports_basic.chisa");
+}
+
+test "comments: line block and doc comments are ignored" {
+    try compileFile("tests/fixtures/comments_basic.chisa");
+}
+
+test "imports: alias imported names" {
+    try compileFile("tests/fixtures/imports_alias_basic.chisa");
+}
+
+test "exports: re-export from another module with alias" {
+    try compileFile("tests/fixtures/reexport_chain_consumer.chisa");
+}
+
+test "stdlib: net module compiles" {
+    try compileFile("tests/fixtures/net_basic.chisa");
+}
+
+test "match: payload binding keeps enum payload type" {
+    try compileFile("tests/fixtures/either_match_payload_method.chisa");
+}
+
+test "match: imported payload enum keeps extension methods" {
+    try compileFile("tests/fixtures/either_match_imported_payload_consumer.chisa");
+}
+
+test "codegen: Either<String> propagation compiles to native" {
+    try compileFileToNative("tests/e2e/either_string_codegen.chisa");
+}
+
+test "codegen: Either<pointer> propagation compiles to native" {
+    try compileFileToNative("tests/e2e/either_pointer_codegen.chisa");
+}
+
+test "codegen: Either<byte pointer> propagation compiles to native" {
+    try compileFileToNative("tests/e2e/either_byte_pointer_codegen.chisa");
+}
+
+test "codegen: imported match payload keeps enum methods" {
+    try compileFileToNative("tests/fixtures/either_match_imported_payload_consumer.chisa");
 }
 
 // ── Unimplemented feature tests (skipped) ────────────────────────────────────
@@ -240,16 +298,36 @@ test "inference: expected type drives generic enum construction" {
     try compileFile("tests/fixtures/infer_expected_generic_enum.chisa");
 }
 
+test "function types: generic aliases in parameters" {
+    try compileFile("tests/fixtures/function_types_alias_generic.chisa");
+}
+
 test "safe navigation: optional chaining with ?." {
     try compileFile("tests/fixtures/safe_navigation.chisa");
+}
+
+test "safe navigation: optional chaining with extension calls" {
+    try compileFile("tests/fixtures/safe_navigation_extension.chisa");
 }
 
 test "error propagation: !! operator on Either" {
     try compileFile("tests/fixtures/error_propagation.chisa");
 }
 
+test "error propagation: !! operator via Option.toEither" {
+    try compileFile("tests/fixtures/error_propagation_option.chisa");
+}
+
 test "when: top-level when block defining platform function" {
     try compileFile("tests/fixtures/when_toplevel.chisa");
+}
+
+test "when: top-level when block with multi-declaration arm" {
+    try compileFile("tests/fixtures/when_toplevel_multidecl.chisa");
+}
+
+test "type alias: exported alias imported in another module" {
+    try compileFile("tests/fixtures/type_alias_export_consumer.chisa");
 }
 
 test "comptime: runtime block inside comptime" {
@@ -270,6 +348,18 @@ test "errors: type mismatch" {
     try expectCompileError("tests/fixtures/errors/type_mismatch.chisa");
 }
 
+test "errors: generic type mismatch" {
+    try expectCompileError("tests/fixtures/errors/generic_type_mismatch.chisa");
+}
+
+test "errors: pointer type mismatch" {
+    try expectCompileError("tests/fixtures/errors/pointer_type_mismatch.chisa");
+}
+
+test "errors: function type mismatch" {
+    try expectCompileError("tests/fixtures/errors/function_type_mismatch.chisa");
+}
+
 test "errors: reassign const" {
     try expectCompileError("tests/fixtures/errors/reassign_const.chisa");
 }
@@ -280,4 +370,12 @@ test "errors: unknown expression type" {
 
 test "errors: block expression syntax is reserved for lambdas" {
     try expectCompileError("tests/fixtures/errors/block_expr_removed.chisa");
+}
+
+test "errors: if expression without else in value position" {
+    try expectCompileError("tests/fixtures/errors/if_without_else_value.chisa");
+}
+
+test "errors: as cast target must be primitive" {
+    try expectCompileError("tests/fixtures/errors/as_cast_non_primitive.chisa");
 }

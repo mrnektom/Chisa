@@ -76,6 +76,9 @@ pub fn analyzeReassign(self: anytype, reassign: ast.stmt.ZSReassign) Error!void 
                             try self.indexElemTypes.put(idx.startPos, type_resolver.typeToString(st.type_args[0]));
                         }
                     },
+                    .long => {
+                        try self.indexElemTypes.put(idx.startPos, "char");
+                    },
                     else => {},
                 }
             } else {
@@ -253,6 +256,9 @@ pub fn analyzeNode(self: anytype, node: ast.ZSAstNode) Error!?Symbol {
     return switch (node) {
         .stmt => try analyzeStmt(self, node.stmt),
         .expr => b: {
+            const savedStatementContext = self.statementExprContext;
+            self.statementExprContext = true;
+            defer self.statementExprContext = savedStatementContext;
             _ = try self.analyzeExpr(node.expr);
             break :b null;
         },
@@ -272,33 +278,38 @@ pub fn analyzeNode(self: anytype, node: ast.ZSAstNode) Error!?Symbol {
 pub fn analyzeImport(self: anytype, imp: ast.ZSImport) Error!?Symbol {
     // Look up dependency analysis results
     if (self.deps.get(imp.path)) |depResult| {
+        var extIter = depResult.extensionFns.iterator();
+        while (extIter.next()) |entry| {
+            const gop = try self.extensionFns.getOrPut(entry.key_ptr.*);
+            if (!gop.found_existing) {
+                gop.value_ptr.* = try std.ArrayList(OverloadEntry).initCapacity(self.allocator, entry.value_ptr.items.len);
+            }
+            for (entry.value_ptr.items) |ov| {
+                try gop.value_ptr.append(self.allocator, ov);
+            }
+        }
+
+        var genericIter = depResult.genericFns.iterator();
+        while (genericIter.next()) |entry| {
+            if (std.mem.indexOfScalar(u8, entry.key_ptr.*, '.')) |_| {
+                if (!self.genericFns.contains(entry.key_ptr.*)) {
+                    try self.genericFns.put(entry.key_ptr.*, entry.value_ptr.*);
+                }
+            }
+        }
+
         for (imp.symbols) |sym| {
             const localName = sym.alias orelse sym.name;
+            var found = false;
             if (depResult.exports.get(sym.name)) |exportedSym| {
                 try self.tableStack.put(.{
                     .name = localName,
                     .assignable = exportedSym.assignable,
                     .signature = exportedSym.signature,
                 });
-            } else if (depResult.exportedEnumDefs.get(sym.name)) |ed| {
-                // Import an exported enum definition
-                if (!self.enumDefs.contains(localName)) {
-                    try self.enumDefs.put(localName, ed);
-                }
-            } else if (depResult.exportedStructDefs.get(sym.name)) |sd| {
-                // Import an exported struct definition
-                if (!self.structDefs.contains(localName)) {
-                    try self.structDefs.put(localName, sd);
-                }
-            } else if (depResult.genericFns.get(sym.name)) |gfn| {
-                // Import a generic function definition
-                if (!self.genericFns.contains(localName)) {
-                    try self.genericFns.put(localName, gfn);
-                }
-                // Also put a placeholder in scope so references resolve
-                try self.tableStack.put(.{ .name = localName, .assignable = false, .signature = .unknown });
-            } else if (depResult.overloads.get(sym.name)) |entries| {
-                // Import overloaded function
+                found = true;
+            }
+            if (depResult.overloads.get(sym.name)) |entries| {
                 const gop = try self.overloads.getOrPut(localName);
                 if (!gop.found_existing) {
                     gop.value_ptr.* = try std.ArrayList(OverloadEntry).initCapacity(self.allocator, 2);
@@ -306,7 +317,33 @@ pub fn analyzeImport(self: anytype, imp: ast.ZSImport) Error!?Symbol {
                 for (entries.items) |ov| {
                     try gop.value_ptr.append(self.allocator, ov);
                 }
-            } else {
+                if (gop.value_ptr.items.len > 1) {
+                    try self.overloadedNames.put(localName, {});
+                }
+                found = true;
+            }
+            if (depResult.exportedEnumDefs.get(sym.name)) |ed| {
+                // Import an exported enum definition
+                if (!self.enumDefs.contains(localName)) {
+                    try self.enumDefs.put(localName, ed);
+                }
+                found = true;
+            } else if (depResult.exportedStructDefs.get(sym.name)) |sd| {
+                // Import an exported struct definition
+                if (!self.structDefs.contains(localName)) {
+                    try self.structDefs.put(localName, sd);
+                }
+                found = true;
+            } else if (depResult.genericFns.get(sym.name)) |gfn| {
+                // Import a generic function definition
+                if (!self.genericFns.contains(localName)) {
+                    try self.genericFns.put(localName, gfn);
+                }
+                // Also put a placeholder in scope so references resolve
+                try self.tableStack.put(.{ .name = localName, .assignable = false, .signature = .unknown });
+                found = true;
+            }
+            if (!found) {
                 try self.recordErrorAt(imp.startPos, imp.endPos, "Imported symbol not found in module");
             }
         }
@@ -318,6 +355,26 @@ pub fn analyzeImport(self: anytype, imp: ast.ZSImport) Error!?Symbol {
 
 pub fn analyzeExportFrom(self: anytype, ef: ast.ZSExportFrom) Error!void {
     if (self.deps.get(ef.path)) |depResult| {
+        var extIter = depResult.extensionFns.iterator();
+        while (extIter.next()) |entry| {
+            const gop = try self.extensionFns.getOrPut(entry.key_ptr.*);
+            if (!gop.found_existing) {
+                gop.value_ptr.* = try std.ArrayList(OverloadEntry).initCapacity(self.allocator, entry.value_ptr.items.len);
+            }
+            for (entry.value_ptr.items) |ov| {
+                try gop.value_ptr.append(self.allocator, ov);
+            }
+        }
+
+        var genericIter = depResult.genericFns.iterator();
+        while (genericIter.next()) |entry| {
+            if (std.mem.indexOfScalar(u8, entry.key_ptr.*, '.')) |_| {
+                if (!self.genericFns.contains(entry.key_ptr.*)) {
+                    try self.genericFns.put(entry.key_ptr.*, entry.value_ptr.*);
+                }
+            }
+        }
+
         for (ef.symbols) |sym| {
             const localName = sym.alias orelse sym.name;
             // Re-export functions/variables
@@ -353,6 +410,9 @@ pub fn analyzeExportFrom(self: anytype, ef: ast.ZSExportFrom) Error!void {
                 }
                 for (entries.items) |ov| {
                     try gop.value_ptr.append(self.allocator, ov);
+                }
+                if (gop.value_ptr.items.len > 1) {
+                    try self.overloadedNames.put(localName, {});
                 }
             }
             // Re-export generic function definitions

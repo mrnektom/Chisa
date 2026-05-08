@@ -1,0 +1,14 @@
+import { Either } from "../../stdlib/Either.chisa"
+import { String } from "../../stdlib/String.chisa"
+
+export enum NetLikeError {
+    Failed,
+}
+
+export fn NetLikeError.toString(): String = match this {
+    NetLikeError.Failed -> "failed"
+}
+
+export fn fetch(): Either<NetLikeError, String> {
+    return Either.Left(NetLikeError.Failed)
+}

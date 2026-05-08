@@ -1,0 +1,17 @@
+// Leading line comment
+/* Leading block comment */
+/// Documentation for add
+fn add(a: number, b: number): number = a + b
+
+/**
+ * Documentation for Point
+ */
+struct Point { x: number, y: number }
+
+let p = Point {
+    x: 2, // Trailing comment on a field
+    y: add(1, 2),
+}
+
+print(p.x)
+print(p.y)

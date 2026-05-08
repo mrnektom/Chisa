@@ -59,10 +59,40 @@ fn formatSigType(arena: std.mem.Allocator, t: Sig.ZSType) []const u8 {
         .byte => "byte",
         .void => "void",
         .unknown => "unknown",
-        .function => "function",
-        .struct_type => |st| st.name,
-        .enum_type => |et| et.name,
-        .pointer => "pointer",
+        .function => |f| blk: {
+            var parts = std.ArrayList([]const u8).empty;
+            defer parts.deinit(arena);
+            for (f.args) |arg| {
+                parts.append(arena, formatSigType(arena, arg.type)) catch {};
+            }
+            const params = std.mem.join(arena, ", ", parts.items) catch break :blk "function";
+            const ret = formatSigType(arena, f.ret.*);
+            break :blk std.fmt.allocPrint(arena, "({s}) -> {s}", .{ params, ret }) catch "function";
+        },
+        .struct_type => |st| blk: {
+            if (st.type_args.len == 0) break :blk st.name;
+            var parts = std.ArrayList([]const u8).empty;
+            defer parts.deinit(arena);
+            for (st.type_args) |arg| {
+                parts.append(arena, formatSigType(arena, arg)) catch {};
+            }
+            const joined = std.mem.join(arena, ", ", parts.items) catch break :blk st.name;
+            break :blk std.fmt.allocPrint(arena, "{s}<{s}>", .{ st.name, joined }) catch st.name;
+        },
+        .enum_type => |et| blk: {
+            if (et.type_args.len == 0) break :blk et.name;
+            var parts = std.ArrayList([]const u8).empty;
+            defer parts.deinit(arena);
+            for (et.type_args) |arg| {
+                parts.append(arena, formatSigType(arena, arg)) catch {};
+            }
+            const joined = std.mem.join(arena, ", ", parts.items) catch break :blk et.name;
+            break :blk std.fmt.allocPrint(arena, "{s}<{s}>", .{ et.name, joined }) catch et.name;
+        },
+        .pointer => |ptr| blk: {
+            const inner = formatSigType(arena, ptr.*);
+            break :blk std.fmt.allocPrint(arena, "Pointer<{s}>", .{inner}) catch "pointer";
+        },
         .array_type => |a| blk: {
             const elem = formatSigType(arena, a.element_type.*);
             break :blk std.fmt.allocPrint(arena, "{s}[]", .{elem}) catch elem;
@@ -71,8 +101,67 @@ fn formatSigType(arena: std.mem.Allocator, t: Sig.ZSType) []const u8 {
 }
 
 fn extractReceiverType(name: []const u8) []const u8 {
-    const underscorePos = std.mem.indexOfScalar(u8, name, '_') orelse return name;
-    return name[0..underscorePos];
+    const dotPos = std.mem.indexOfScalar(u8, name, '.') orelse return name;
+    return name[0..dotPos];
+}
+
+fn extractMethodName(name: []const u8) []const u8 {
+    const dotPos = std.mem.indexOfScalar(u8, name, '.') orelse return name;
+    return name[dotPos + 1 ..];
+}
+
+fn writeFunctionEntry(
+    buf: *std.ArrayList(u8),
+    a: std.mem.Allocator,
+    name: []const u8,
+    argTypes: []const Sig.ZSFnArg,
+    retType: Sig.ZSType,
+    isExternal: bool,
+    isExported: bool,
+) !void {
+    try buf.appendSlice(a, "        {");
+    try buf.append(a, '\n');
+    try buf.appendSlice(a, "            \"kind\": \"function\",");
+    try buf.append(a, '\n');
+    try buf.appendSlice(a, "            \"name\": ");
+    try P.str(buf, a, name);
+    try buf.append(a, ',');
+    try buf.append(a, '\n');
+    try buf.appendSlice(a, "            \"type_params\": [],");
+    try buf.append(a, '\n');
+    try buf.appendSlice(a, "            \"params\": [");
+    for (argTypes, 0..) |arg, i| {
+        if (i > 0) try buf.append(a, ',');
+        try buf.append(a, '\n');
+        try buf.appendSlice(a, "                {");
+        try buf.append(a, '\n');
+        try buf.appendSlice(a, "                    \"name\": ");
+        try P.str(buf, a, arg.name);
+        try buf.append(a, ',');
+        try buf.append(a, '\n');
+        try buf.appendSlice(a, "                    \"type\": ");
+        try P.str(buf, a, formatSigType(a, arg.type));
+        try buf.append(a, '\n');
+        try buf.appendSlice(a, "                }");
+    }
+    if (argTypes.len > 0) {
+        try buf.append(a, '\n');
+        try buf.appendSlice(a, "            ");
+    }
+    try buf.appendSlice(a, "],");
+    try buf.append(a, '\n');
+    try buf.appendSlice(a, "            \"return_type\": ");
+    try P.str(buf, a, formatSigType(a, retType));
+    try buf.append(a, ',');
+    try buf.append(a, '\n');
+    try buf.appendSlice(a, "            \"external\": ");
+    try buf.appendSlice(a, if (isExternal) "true" else "false");
+    try buf.append(a, ',');
+    try buf.append(a, '\n');
+    try buf.appendSlice(a, "            \"exported\": ");
+    try buf.appendSlice(a, if (isExported) "true" else "false");
+    try buf.append(a, '\n');
+    try buf.appendSlice(a, "        }");
 }
 
 // ─── Pretty JSON writer ─────────────────────────────────────────────────────
@@ -286,7 +375,7 @@ fn writeDetailedType(buf: *std.ArrayList(u8), a: std.mem.Allocator, t: Sig.ZSTyp
 
 // ─── Main dump function ─────────────────────────────────────────────────────
 
-pub fn dump(allocator: std.mem.Allocator, result: Analyzer.AnalyzeResult) !void {
+pub fn dump(allocator: std.mem.Allocator, io: std.Io, result: Analyzer.AnalyzeResult) !void {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -411,6 +500,9 @@ pub fn dump(allocator: std.mem.Allocator, result: Analyzer.AnalyzeResult) !void 
     }
 
     // ─── moduleScope symbols ───
+    var emittedOverloadNames = std.StringHashMap(void).init(a);
+    defer emittedOverloadNames.deinit();
+
     var scopeIter = result.moduleScope.iterator();
     while (scopeIter.next()) |entry| {
         const sym = entry.value_ptr.*;
@@ -477,68 +569,42 @@ pub fn dump(allocator: std.mem.Allocator, result: Analyzer.AnalyzeResult) !void 
                 try buf.append(a, '\n');
                 try buf.appendSlice(a, "        }");
             }
+        } else if (result.overloads.get(sym.name)) |overloads| {
+            if (emittedOverloadNames.contains(sym.name)) continue;
+            try emittedOverloadNames.put(sym.name, {});
+
+            for (overloads.items, 0..) |ov, overloadIndex| {
+                if (!first) try buf.append(a, ',');
+                first = false;
+                try buf.append(a, '\n');
+
+                const argInfos = try a.alloc(Sig.ZSFnArg, ov.argTypes.len);
+                for (ov.argTypes, 0..) |argType, i| {
+                    const argName = try std.fmt.allocPrint(a, "arg{d}", .{i});
+                    argInfos[i] = .{
+                        .name = argName,
+                        .type = if (std.mem.eql(u8, argType, "number")) .number else if (std.mem.eql(u8, argType, "boolean")) .boolean else if (std.mem.eql(u8, argType, "char")) .char else if (std.mem.eql(u8, argType, "long")) .long else if (std.mem.eql(u8, argType, "short")) .short else if (std.mem.eql(u8, argType, "byte")) .byte else if (std.mem.eql(u8, argType, "void")) .void else .unknown,
+                    };
+                }
+
+                const displayName = if (overloads.items.len > 1)
+                    try std.fmt.allocPrint(a, "{s}#{d}", .{ sym.name, overloadIndex })
+                else
+                    sym.name;
+                try writeFunctionEntry(&buf, a, displayName, argInfos, ov.retType, ov.external, result.exports.contains(sym.name));
+            }
         } else if (sym.signature == .function) {
             const fnInfo = sym.signature.function;
             if (!first) try buf.append(a, ',');
             first = false;
             try buf.append(a, '\n');
-            try buf.appendSlice(a, "        {");
-            try buf.append(a, '\n');
-            try buf.appendSlice(a, "            \"kind\": \"function\",");
-            try buf.append(a, '\n');
-            try buf.appendSlice(a, "            \"name\": ");
-            try P.str(&buf, a, sym.name);
-            try buf.append(a, ',');
-            try buf.append(a, '\n');
-            try buf.appendSlice(a, "            \"type_params\": [],");
-            try buf.append(a, '\n');
-            try buf.appendSlice(a, "            \"params\": [");
-            for (fnInfo.args, 0..) |arg, i| {
-                if (i > 0) try buf.append(a, ',');
-                try buf.append(a, '\n');
-                try buf.appendSlice(a, "                {");
-                try buf.append(a, '\n');
-                try buf.appendSlice(a, "                    \"name\": ");
-                try P.str(&buf, a, arg.name);
-                try buf.append(a, ',');
-                try buf.append(a, '\n');
-                try buf.appendSlice(a, "                    \"type\": ");
-                try P.str(&buf, a, formatSigType(a, arg.type));
-                try buf.append(a, '\n');
-                try buf.appendSlice(a, "                }");
-            }
-            if (fnInfo.args.len > 0) {
-                try buf.append(a, '\n');
-                try buf.appendSlice(a, "            ");
-            }
-            try buf.appendSlice(a, "],");
-            try buf.append(a, '\n');
-            try buf.appendSlice(a, "            \"return_type\": ");
-            try P.str(&buf, a, formatSigType(a, fnInfo.ret.*));
             const isExternal = blk: {
                 if (result.overloads.get(sym.name)) |overloads| {
                     if (overloads.items.len > 0) break :blk overloads.items[0].external;
                 }
                 break :blk false;
             };
-            try buf.append(a, ',');
-            try buf.append(a, '\n');
-            try buf.appendSlice(a, "            \"external\": ");
-            if (isExternal) {
-                try buf.appendSlice(a, "true");
-            } else {
-                try buf.appendSlice(a, "false");
-            }
-            try buf.append(a, ',');
-            try buf.append(a, '\n');
-            try buf.appendSlice(a, "            \"exported\": ");
-            if (result.exports.contains(sym.name)) {
-                try buf.appendSlice(a, "true");
-            } else {
-                try buf.appendSlice(a, "false");
-            }
-            try buf.append(a, '\n');
-            try buf.appendSlice(a, "        }");
+            try writeFunctionEntry(&buf, a, sym.name, fnInfo.args, fnInfo.ret.*, isExternal, result.exports.contains(sym.name));
         } else {
             if (!first) try buf.append(a, ',');
             first = false;
@@ -598,17 +664,14 @@ pub fn dump(allocator: std.mem.Allocator, result: Analyzer.AnalyzeResult) !void 
     // ─── Extension functions ───
     var extFnIter = result.extensionFns.iterator();
     while (extFnIter.next()) |entry| {
-        const mangledName = entry.key_ptr.*;
+        const extName = entry.key_ptr.*;
         const overloads = entry.value_ptr.*;
         if (overloads.items.len > 0) {
             const ov = overloads.items[0];
             if (!first) try buf.append(a, ',');
             first = false;
-            const receiverType = extractReceiverType(mangledName);
-            var methodDisplayName = mangledName;
-            if (std.mem.indexOfScalar(u8, mangledName, '_')) |pos| {
-                methodDisplayName = mangledName[pos + 1 ..];
-            }
+            const receiverType = extractReceiverType(extName);
+            const methodDisplayName = extractMethodName(extName);
             try buf.append(a, '\n');
             try buf.appendSlice(a, "        {");
             try buf.append(a, '\n');
@@ -628,9 +691,11 @@ pub fn dump(allocator: std.mem.Allocator, result: Analyzer.AnalyzeResult) !void 
                 try buf.append(a, '\n');
                 try buf.appendSlice(a, "                {");
                 try buf.append(a, '\n');
-                try buf.appendSlice(a, "                    \"name\": \"this\",");
+                const argName = try std.fmt.allocPrint(a, "arg{d}", .{i});
+                try buf.appendSlice(a, "                    \"name\": ");
+                try P.str(&buf, a, argName);
                 try buf.append(a, '\n');
-                try buf.appendSlice(a, "                    \"type\": ");
+                try buf.appendSlice(a, "                    ,\"type\": ");
                 try P.str(&buf, a, argType);
                 try buf.append(a, '\n');
                 try buf.appendSlice(a, "                }");
@@ -653,6 +718,5 @@ pub fn dump(allocator: std.mem.Allocator, result: Analyzer.AnalyzeResult) !void 
     try buf.append(a, '\n');
     try buf.appendSlice(a, "}\n");
 
-    const stdout = std.fs.File.stdout();
-    try stdout.writeAll(buf.items);
+    try std.Io.File.stdout().writeStreamingAll(io, buf.items);
 }

@@ -3,6 +3,7 @@ package org.chisa.intellij.reference
 import com.intellij.openapi.util.TextRange
 import com.intellij.psi.PsiElement
 import com.intellij.psi.PsiReferenceBase
+import com.intellij.psi.util.PsiTreeUtil
 import org.chisa.intellij.psi.ChisaExportFromStatement
 import org.chisa.intellij.psi.ChisaImportStatement
 import org.chisa.intellij.psi.ChisaEnumDeclaration
@@ -23,22 +24,24 @@ class ChisaImportSymbolReference(element: ChisaImportSymbol) :
     }
 
     override fun resolve(): PsiElement? {
-        val parent = element.parent
         val originalName = element.getOriginalName() ?: return null
+        val importStmt = PsiTreeUtil.getParentOfType(element, ChisaImportStatement::class.java)
+        val exportFromStmt = PsiTreeUtil.getParentOfType(element, ChisaExportFromStatement::class.java)
+        val useStmt = PsiTreeUtil.getParentOfType(element, ChisaUseStatement::class.java)
 
-        return when (parent) {
-            is ChisaImportStatement -> {
-                val path = parent.getPath() ?: return null
+        return when {
+            importStmt != null -> {
+                val path = importStmt.getPath() ?: return null
                 val targetFile = ChisaResolveUtil.resolveImportPath(element, path) ?: return null
                 ChisaResolveUtil.findExportedSymbol(targetFile, originalName)
             }
-            is ChisaExportFromStatement -> {
-                val path = parent.getPath() ?: return null
+            exportFromStmt != null -> {
+                val path = exportFromStmt.getPath() ?: return null
                 val targetFile = ChisaResolveUtil.resolveImportPath(element, path) ?: return null
                 ChisaResolveUtil.findExportedSymbol(targetFile, originalName)
             }
-            is ChisaUseStatement -> {
-                val enumName = parent.getEnumName() ?: return null
+            useStmt != null -> {
+                val enumName = useStmt.getEnumName() ?: return null
                 val enumDecl = ChisaResolveUtil.resolveInScope(element, enumName) ?: return null
                 if (enumDecl is ChisaEnumDeclaration) {
                     ChisaResolveUtil.findEnumVariant(enumDecl, originalName)

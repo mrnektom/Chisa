@@ -1,0 +1,14 @@
+type Predicate<T> = (T) -> boolean
+type Transform<A, B> = (A) -> B
+
+fn filterOne(value: number, pred: Predicate<number>): number =
+    if (pred(value)) value else 0
+
+fn applyTwice(value: number, f: Transform<number, number>): number =
+    f(f(value))
+
+let kept = filterOne(10, { n -> n > 5 })
+let doubled = applyTwice(3, { n -> n * 2 })
+
+print(kept)
+print(doubled)

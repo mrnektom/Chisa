@@ -30,7 +30,7 @@ pub fn hasNext(self: *Tokenizer) bool {
     return self.position < self.input.len;
 }
 
-fn skipWhitespace(self: *Tokenizer) void {
+fn skipWhitespace(self: *Tokenizer) !void {
     while (self.peek()) |c| {
         if (std.ascii.isWhitespace(c)) {
             self.shift();
@@ -50,14 +50,17 @@ fn skipWhitespace(self: *Tokenizer) void {
             if (next_char == '*') {
                 self.shift();
                 self.shift();
+                var closed = false;
                 while (self.peek()) |comment_char| {
                     if (comment_char == '*' and self.position + 1 < self.input.len and self.input[self.position + 1] == '/') {
                         self.shift();
                         self.shift();
+                        closed = true;
                         break;
                     }
                     self.shift();
                 }
+                if (!closed) return Error.UnexpectedEndOfInput;
                 continue;
             }
         }
@@ -207,6 +210,7 @@ fn eatPunc(self: *Tokenizer) void {
 }
 
 pub fn next(self: *Tokenizer) Error!?ZSToken {
+    try self.skipWhitespace();
     const tokenType = try self.currentTokenType() orelse return null;
     const startPos = self.position;
     const startLine = self.line;
@@ -218,7 +222,7 @@ pub fn next(self: *Tokenizer) Error!?ZSToken {
         .string => try self.eatString(),
         .char_literal => try self.eatCharLiteral(),
         .punctuation => self.eatPunc(),
-        .whitespace => self.skipWhitespace(),
+        .whitespace => try self.skipWhitespace(),
     }
 
     const endPos = self.position;
@@ -346,6 +350,12 @@ test "string with escaped quote" {
 
 test "unterminated escape in string" {
     var t = Tokenizer.create("\"hello\\");
+    const result = t.next();
+    try std.testing.expectError(Error.UnexpectedEndOfInput, result);
+}
+
+test "unterminated block comment error" {
+    var t = Tokenizer.create("/* hello");
     const result = t.next();
     try std.testing.expectError(Error.UnexpectedEndOfInput, result);
 }

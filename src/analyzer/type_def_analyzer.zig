@@ -175,7 +175,10 @@ pub fn analyzeIndexAccess(self: anytype, ia: ast.expr.ZSIndexAccess) Error!Symbo
             try self.recordError(ia, "Index access on non-array type");
             break :blk Symbol.ZSTypeNotation.unknown;
         },
-        .long => .char,
+        .long => blk: {
+            try self.indexElemTypes.put(ia.startPos, "char");
+            break :blk .char;
+        },
         else => blk: {
             try self.recordError(ia, "Index access on non-array type");
             break :blk Symbol.ZSTypeNotation.unknown;
@@ -408,7 +411,10 @@ pub fn analyzeMatchExpr(self: anytype, me: ast.expr.ZSMatchExpr) Error!Symbol.ZS
     // For enum patterns, subject must be an enum type
     var hasEnumArm = false;
     for (me.arms) |arm| {
-        if (arm.pattern == .enum_variant) { hasEnumArm = true; break; }
+        if (arm.pattern == .enum_variant) {
+            hasEnumArm = true;
+            break;
+        }
     }
     if (hasEnumArm and subjectType != .enum_type) {
         try self.recordError(me, "Match subject must be an enum type for enum patterns");
@@ -508,11 +514,16 @@ pub fn analyzeMatchExpr(self: anytype, me: ast.expr.ZSMatchExpr) Error!Symbol.ZS
         const armType = try self.analyzeExpr(arm.body.*);
         _ = try self.tableStack.exitScope();
 
+        const armTerminates = arm.body.* == .return_expr;
+        if (armTerminates) {
+            continue;
+        }
+
         if (resultType == .unknown) {
             resultType = armType;
         } else if (armType != .unknown and
-                   !type_resolver.typesCompatible(resultType, armType) and
-                   !type_resolver.typesCompatible(armType, resultType))
+            !type_resolver.typesCompatible(resultType, armType) and
+            !type_resolver.typesCompatible(armType, resultType))
         {
             try self.recordError(me, "match arms have incompatible return types");
         }
@@ -522,11 +533,13 @@ pub fn analyzeMatchExpr(self: anytype, me: ast.expr.ZSMatchExpr) Error!Symbol.ZS
     if (me.has_else) {
         if (me.else_body) |eb| {
             const elseType = try self.analyzeExpr(eb.*);
-            if (resultType == .unknown) {
+            if (eb.* == .return_expr) {
+                return resultType;
+            } else if (resultType == .unknown) {
                 resultType = elseType;
             } else if (elseType != .unknown and
-                       !type_resolver.typesCompatible(resultType, elseType) and
-                       !type_resolver.typesCompatible(elseType, resultType))
+                !type_resolver.typesCompatible(resultType, elseType) and
+                !type_resolver.typesCompatible(elseType, resultType))
             {
                 try self.recordError(me, "else branch type is incompatible with match arms");
             }

@@ -1,0 +1,10 @@
+import { Option } from "../../stdlib/Option.chisa"
+
+fn number.double(): number = this * 2
+
+let present = Option.Some(21)?.double()
+let missing: Option<number> = Option.None
+let absent = missing?.double()
+
+print(present.getOrElse(0))
+print(absent.getOrElse(0))

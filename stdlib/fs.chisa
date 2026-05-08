@@ -23,36 +23,49 @@ export enum FsError {
   IoError,
 }
 
+fn numberToStringLocal(n: number): String {
+  let buf = ['\0'; 20]
+  let pos = 19
+  let is_neg = 0
+  let val = n
+
+  if (n < 0) {
+    is_neg = 1
+    val = 0 - n
+  }
+
+  if (val == 0) {
+    buf[pos] = 48
+    pos = pos - 1
+  }
+
+  while (val > 0) {
+    let digit = val % 10
+    buf[pos] = digit + 48
+    pos = pos - 1
+    val = val / 10
+  }
+
+  if (is_neg == 1) {
+    buf[pos] = 45
+    pos = pos - 1
+  }
+
+  let start = pos + 1
+  let len = 20 - start
+  let result: Pointer<char> = alloc(len)
+  for (let i = 0; i < len; i = i + 1) {
+    result[i] = buf[start + i]
+  }
+  return String { len: len, data: result }
+}
+
 export fn FsError.toString(): String = match this {
     FsError.NotFound -> "NotFound"
     FsError.PermissionDenied -> "PermissionDenied"
     FsError.BadFd -> "BadFd"
     FsError.NoSpace -> "NoSpace"
     FsError.IoError -> "IoError"
-}
-
-fn writeFd(fd: number, s: String): number {
-  asm {
-    in rax = 1
-    in rdi = fd
-    in rsi = s.data
-    in rdx = s.len
-    out rax = result
-    "syscall"
-  }
-  return result
-}
-
-fn readFd(fd: number, buf: Pointer<char>, count: number): number {
-  asm {
-    in rax = 0
-    in rdi = fd
-    in rsi = buf
-    in rdx = count
-    out rax = result
-    "syscall"
-  }
-  return result
 }
 
 fn errnoToFsError(errno: number): FsError = match errno {
@@ -122,7 +135,7 @@ export fn readFile(path: String): Either<FsError, String> {
   if (fd < 0) {
     return Either.Left(errnoToFsError(0 - fd))
   }
-  let cap = 65536
+  let cap: long = 65536
   let buf: Pointer<char> = alloc(cap)
   let bytes = readFd(fd, buf, cap)
   close(fd)
@@ -153,7 +166,7 @@ export fn print(s: String): void {
 }
 
 export fn print(n: number): void {
-  let s = numberToString(n)
+  let s = numberToStringLocal(n)
   writeFd(1, s)
   writeFd(1, "\n")
   free(s.data, s.len)
@@ -161,10 +174,10 @@ export fn print(n: number): void {
 
 export fn readLine(): String {
   let buf = ['\0'; 1024]
-  const bytes = readFd(0, ptr(buf), 1024)
+  let bytes = readFd(0, ptr(buf), 1024)
 
   if (bytes > 0) {
-    if (buf[bytes - 1] == 10) {
+    if (buf[bytes - 1] == '\n') {
       bytes = bytes - 1
     }
   }

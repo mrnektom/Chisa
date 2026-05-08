@@ -7,6 +7,7 @@ const ZSExprType = enum {
     string,
     char,
     boolean,
+    cast,
     call,
     reference,
     if_expr,
@@ -33,6 +34,7 @@ pub const ZSExpr = union(ZSExprType) {
     string: ZSString,
     char: ZSChar,
     boolean: ZSBoolean,
+    cast: ZSCast,
     call: ZSCall,
     reference: ZSReference,
     if_expr: ZSIfExpr,
@@ -57,6 +59,7 @@ pub const ZSExpr = union(ZSExprType) {
         switch (self.*) {
             .call => self.call.deinit(allocator),
             .string => self.string.deinit(allocator),
+            .cast => self.cast.deinit(allocator),
             .if_expr => self.if_expr.deinit(allocator),
             .while_expr => self.while_expr.deinit(allocator),
             .for_expr => self.for_expr.deinit(allocator),
@@ -96,6 +99,7 @@ pub const ZSExpr = union(ZSExprType) {
             .string => self.string.startPos,
             .char => self.char.startPos,
             .boolean => self.boolean.startPos,
+            .cast => self.cast.startPos,
             .call => self.call.startPos,
             .reference => self.reference.startPos,
             .if_expr => self.if_expr.startPos,
@@ -124,6 +128,7 @@ pub const ZSExpr = union(ZSExprType) {
             .string => self.string.endPos,
             .char => self.char.endPos,
             .boolean => self.boolean.endPos,
+            .cast => self.cast.endPos,
             .call => self.call.endPos,
             .reference => self.reference.endPos,
             .if_expr => self.if_expr.endPos,
@@ -177,6 +182,21 @@ pub const ZSBoolean = struct {
     value: bool,
     startPos: usize,
     endPos: usize,
+};
+
+const type_notation = @import("zs_type_notation.zig");
+
+pub const ZSCast = struct {
+    expr: *ZSExpr,
+    target_type: type_notation.ZSTypeNotation,
+    startPos: usize,
+    endPos: usize,
+
+    pub fn deinit(self: *const @This(), allocator: std.mem.Allocator) void {
+        self.expr.deinit(allocator);
+        allocator.destroy(self.expr);
+        self.target_type.deinit(allocator);
+    }
 };
 
 pub const ZSIfExpr = struct {
@@ -427,8 +447,6 @@ pub const ZSUnary = struct {
         allocator.destroy(self.operand);
     }
 };
-
-const type_notation = @import("zs_type_notation.zig");
 
 pub const ZSLambdaParam = struct {
     name: []const u8,

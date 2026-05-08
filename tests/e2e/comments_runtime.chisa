@@ -1,0 +1,6 @@
+// Comments should not affect runtime behavior.
+/* This file intentionally mixes all comment forms. */
+/// Doc comment on a function
+fn compute(): number = 40 + 2
+
+print(compute())

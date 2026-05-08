@@ -90,8 +90,6 @@ pub fn build(b: *std.Build) !void {
     const run_cmd = b.addRunArtifact(exe);
     run_step.dependOn(&run_cmd.step);
 
-    run_cmd.step.dependOn(b.getInstallStep());
-
     if (b.args) |args| {
         run_cmd.addArgs(args);
     }
@@ -108,7 +106,82 @@ pub fn build(b: *std.Build) !void {
 
     const run_exe_tests = b.addRunArtifact(exe_tests);
 
+    const daemon_tests = b.addTest(.{
+        .root_module = daemon_exe.root_module,
+    });
+
+    const run_daemon_tests = b.addRunArtifact(daemon_tests);
+    const codegen_regression_run = b.addRunArtifact(exe);
+    codegen_regression_run.addArgs(&.{
+        "-i",
+        "tests/fixtures/either_match_imported_payload_consumer.chisa",
+        "-o",
+        "/tmp/chisa_codegen_regression_output",
+    });
+
+    const hello_ret_compile = b.addRunArtifact(exe);
+    hello_ret_compile.addArgs(&.{
+        "-i",
+        "tests/e2e/hello_ret.chisa",
+        "-o",
+        "/tmp/chisa_hello_ret_regression",
+    });
+    const hello_ret_verify = b.addSystemCommand(&.{
+        "bash",
+        "-lc",
+        "test \"$(/tmp/chisa_hello_ret_regression)\" = \"hello\"",
+    });
+    hello_ret_verify.step.dependOn(&hello_ret_compile.step);
+
+    const net_error_print_compile = b.addRunArtifact(exe);
+    net_error_print_compile.addArgs(&.{
+        "-i",
+        "tests/e2e/net_error_print.chisa",
+        "-o",
+        "/tmp/chisa_net_error_print_regression",
+    });
+    const net_error_print_verify = b.addSystemCommand(&.{
+        "bash",
+        "-lc",
+        "test \"$(/tmp/chisa_net_error_print_regression)\" = \"ConnectFailed(errno=111)\"",
+    });
+    net_error_print_verify.step.dependOn(&net_error_print_compile.step);
+
+    const error_propagation_compile = b.addRunArtifact(exe);
+    error_propagation_compile.addArgs(&.{
+        "-i",
+        "tests/e2e/error_propagation_runtime.chisa",
+        "-o",
+        "/tmp/chisa_error_propagation_regression",
+    });
+    const error_propagation_verify = b.addSystemCommand(&.{
+        "bash",
+        "-lc",
+        "test \"$(/tmp/chisa_error_propagation_regression)\" = \"1\"",
+    });
+    error_propagation_verify.step.dependOn(&error_propagation_compile.step);
+
+    const either_string_codegen_compile = b.addRunArtifact(exe);
+    either_string_codegen_compile.addArgs(&.{
+        "-i",
+        "tests/e2e/either_string_codegen.chisa",
+        "-o",
+        "/tmp/chisa_either_string_codegen_regression",
+    });
+    const either_string_codegen_verify = b.addSystemCommand(&.{
+        "bash",
+        "-lc",
+        "test \"$(/tmp/chisa_either_string_codegen_regression)\" = \"hello\"",
+    });
+    either_string_codegen_verify.step.dependOn(&either_string_codegen_compile.step);
+
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
+    test_step.dependOn(&run_daemon_tests.step);
+    test_step.dependOn(&codegen_regression_run.step);
+    test_step.dependOn(&hello_ret_verify.step);
+    test_step.dependOn(&net_error_print_verify.step);
+    test_step.dependOn(&error_propagation_verify.step);
+    test_step.dependOn(&either_string_codegen_verify.step);
 }

@@ -1,0 +1,3 @@
+let x = 1
+let p: Pointer<number> = ptr(x)
+let q: Pointer<boolean> = p

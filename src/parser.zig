@@ -731,10 +731,31 @@ fn nextPrimaryExprWithOptions(self: *Self, allow_trailing_lambda_call: bool) Err
             continue;
         }
 
+        if (try self.nextCast(expr)) |castExpr| {
+            expr = castExpr;
+            continue;
+        }
+
         if (self.tokenizer.position == beforePos and self.tokenizer.line == beforeLine) break;
     }
 
     return expr;
+}
+
+fn nextCast(self: *Self, expr: ast.expr.ZSExpr) Error!?ast.expr.ZSExpr {
+    if (!self.checkToken("as")) return null;
+    self.shiftToken();
+
+    const targetType = try self.nextTypeInner();
+    const exprPtr = try self.allocator.create(ast.expr.ZSExpr);
+    exprPtr.* = expr;
+
+    return ast.expr.ZSExpr{ .cast = .{
+        .expr = exprPtr,
+        .target_type = targetType,
+        .startPos = expr.start(),
+        .endPos = self.tokenizer.position,
+    } };
 }
 
 fn nextPrimaryExpr(self: *Self) Error!?ast.expr.ZSExpr {
@@ -2570,6 +2591,16 @@ test "parse trailing shorthand lambda as lambda expression" {
     try std.testing.expectEqual(@as(usize, 2), v.expr.call.arguments.len);
     try std.testing.expect(v.expr.call.arguments[1] == .lambda);
     try std.testing.expect(v.expr.call.arguments[1].lambda.implicit_params_from_context);
+}
+
+test "parse primitive cast with as keyword" {
+    const allocator = std.testing.allocator;
+    const module = try testParse("let value = foo(1) as long");
+    defer module.deinit(allocator);
+    const v = module.ast[0].stmt.variable;
+    try std.testing.expect(v.expr == .cast);
+    try std.testing.expect(v.expr.cast.expr.* == .call);
+    try std.testing.expectEqualStrings("long", v.expr.cast.target_type.typeName());
 }
 
 test "parse if else expression" {

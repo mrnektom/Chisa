@@ -22,9 +22,73 @@ fn callResolutionKey(startPos: usize, endPos: usize) usize {
     return std.hash.Wyhash.hash(0, std.mem.asBytes(&[_]usize{ startPos, endPos }));
 }
 
+fn enumBaseName(name: []const u8) []const u8 {
+    if (std.mem.indexOf(u8, name, "__")) |idx| {
+        return name[0..idx];
+    }
+    return name;
+}
+
+const EnumVariantMatch = struct {
+    enumName: []const u8,
+    variantTag: u32,
+};
+
+fn commonEnumVariantTag(enumName: []const u8, variantName: []const u8) ?u32 {
+    const baseName = enumBaseName(enumName);
+
+    if (std.mem.eql(u8, baseName, "Either")) {
+        if (std.mem.eql(u8, variantName, "Left")) return 0;
+        if (std.mem.eql(u8, variantName, "Right")) return 1;
+    }
+
+    if (std.mem.eql(u8, baseName, "Option")) {
+        if (std.mem.eql(u8, variantName, "Some")) return 0;
+        if (std.mem.eql(u8, variantName, "None")) return 1;
+    }
+
+    return null;
+}
+
+fn findEnumVariantMatch(self: *Self, desiredEnumName: []const u8, variantName: []const u8) ?EnumVariantMatch {
+    var fallback: ?EnumVariantMatch = null;
+    var ambiguous = false;
+    const desiredBaseName = enumBaseName(desiredEnumName);
+
+    for (self.topLevelInstructions.items) |inst| {
+        if (inst != .enum_decl) continue;
+
+        const decl = inst.enum_decl;
+        const exactNameMatch = std.mem.eql(u8, decl.name, desiredEnumName);
+        const baseNameMatch = std.mem.eql(u8, enumBaseName(decl.name), desiredBaseName);
+        if (!exactNameMatch and !baseNameMatch) continue;
+
+        for (decl.variants) |v| {
+            if (!std.mem.eql(u8, v.name, variantName)) continue;
+
+            const match = EnumVariantMatch{
+                .enumName = decl.name,
+                .variantTag = v.tag,
+            };
+            if (exactNameMatch) return match;
+
+            if (fallback == null) {
+                fallback = match;
+            } else if (!std.mem.eql(u8, fallback.?.enumName, decl.name)) {
+                ambiguous = true;
+            }
+            break;
+        }
+    }
+
+    if (ambiguous) return null;
+    return fallback;
+}
+
 instructions: *std.ArrayList(ir.ZSIR),
 topLevelInstructions: *std.ArrayList(ir.ZSIR),
 allocator: std.mem.Allocator,
+namePrefix: []const u8,
 nameCount: usize = 0,
 varNames: std.StringHashMap([]const u8),
 resolutions: *const std.AutoHashMap(usize, []const u8),
@@ -42,6 +106,9 @@ extensionCalls: ?*const std.AutoHashMap(usize, void),
 lambdaNames: ?*const std.AutoHashMap(usize, []const u8),
 lambdaTypes: ?*const std.AutoHashMap(usize, sig.ZSType),
 safeNavInfo: ?*const std.AutoHashMap(usize, Analyzer.SafeNavInfo),
+returnWrapInfo: ?*const std.AutoHashMap(usize, Analyzer.ReturnWrapInfo),
+primitiveCastInfo: ?*const std.AutoHashMap(usize, Analyzer.PrimitiveCastInfo),
+currentFunctionReturnType: ?[]const u8 = null,
 // Closure capture state — set only while inside generateLambda body gen
 outerVarNamesForCapture: ?*const std.StringHashMap([]const u8) = null,
 currentLambdaCaptures: ?*std.ArrayList(CaptureEntry) = null,
@@ -70,6 +137,8 @@ pub const IrGenContext = struct {
     lambdaNames: ?*const std.AutoHashMap(usize, []const u8) = null,
     lambdaTypes: ?*const std.AutoHashMap(usize, sig.ZSType) = null,
     safeNavInfo: ?*const std.AutoHashMap(usize, Analyzer.SafeNavInfo) = null,
+    returnWrapInfo: ?*const std.AutoHashMap(usize, Analyzer.ReturnWrapInfo) = null,
+    primitiveCastInfo: ?*const std.AutoHashMap(usize, Analyzer.PrimitiveCastInfo) = null,
 };
 
 pub const IrGenResult = struct {
@@ -100,6 +169,7 @@ pub fn generate(ctx: IrGenContext) !IrGenResult {
         .instructions = &instructions,
         .topLevelInstructions = &instructions,
         .allocator = allocator,
+        .namePrefix = try std.fmt.allocPrint(allocator, "m{x}_", .{std.hash.Wyhash.hash(0, ctx.module.filename)}),
         .varNames = varNames,
         .resolutions = ctx.resolutions,
         .overloadedNames = ctx.overloadedNames,
@@ -116,10 +186,13 @@ pub fn generate(ctx: IrGenContext) !IrGenResult {
         .lambdaNames = ctx.lambdaNames,
         .lambdaTypes = ctx.lambdaTypes,
         .safeNavInfo = ctx.safeNavInfo,
+        .returnWrapInfo = ctx.returnWrapInfo,
+        .primitiveCastInfo = ctx.primitiveCastInfo,
         .lambdaCaptureMap = std.StringHashMap([]CaptureEntry).init(allocator),
     };
     // Cleanup lambdaCaptureMap on both success and error paths
     defer {
+        allocator.free(irGen.namePrefix);
         var mapIter = irGen.lambdaCaptureMap.iterator();
         while (mapIter.next()) |entry| {
             // paramName strings are owned by fn_def.argNames; freed by fn_def.deinit
@@ -232,6 +305,7 @@ fn generateExpr(self: *Self, expr: ast.expr.ZSExpr) Error![]const u8 {
         .string => self.generateStringAssign(expr.string),
         .char => self.generateCharAssign(expr.char),
         .boolean => self.generateBooleanAssign(expr.boolean),
+        .cast => self.generateCast(expr.cast),
         .call => self.generateCallOrIntrinsic(expr.call),
         .reference => try self.generateReference(expr.reference),
         .if_expr => self.generateIfExpr(expr.if_expr),
@@ -252,6 +326,24 @@ fn generateExpr(self: *Self, expr: ast.expr.ZSExpr) Error![]const u8 {
         .lambda => self.generateLambda(expr.lambda),
         .safe_nav => self.generateSafeNav(expr.safe_nav),
     };
+}
+
+fn generateCast(self: *Self, cast: ast.expr.ZSCast) Error![]const u8 {
+    const operandName = try self.generateExpr(cast.expr.*);
+    const castInfo = if (self.primitiveCastInfo) |info|
+        info.get(cast.endPos) orelse unreachable
+    else
+        unreachable;
+
+    const resultName = try self.generateName();
+    try self.instructions.append(self.allocator, ir.ZSIR{ .cast = .{
+        .resultName = resultName,
+        .operand = operandName,
+        .sourceType = castInfo.sourceType,
+        .targetType = castInfo.targetType,
+        .startPos = cast.startPos,
+    } });
+    return resultName;
 }
 
 fn generateCallOrIntrinsic(self: *Self, call: ast.expr.ZSCall) Error![]const u8 {
@@ -598,11 +690,14 @@ fn generateFunction(self: *Self, func: ast.stmt.ZSFn) ![]const u8 {
         }
         const outerVarNames = self.varNames;
         self.varNames = innerVarNames;
+        const savedFunctionReturnType = self.currentFunctionReturnType;
+        self.currentFunctionReturnType = retType;
         defer {
             // Restore outer state on both success and error paths
             self.instructions = outerInstructions;
             var modifiedInner = self.varNames;
             self.varNames = outerVarNames;
+            self.currentFunctionReturnType = savedFunctionReturnType;
             modifiedInner.deinit();
         }
 
@@ -938,12 +1033,15 @@ fn generateReturn(self: *Self, ret: ast.expr.ZSReturn) Error![]const u8 {
     if (ret.value) |v| {
         valueName = try self.generateExpr(v.*);
     }
+    const wrapInfo = if (self.returnWrapInfo) |m| m.get(ret.startPos) else null;
     try self.instructions.append(
         self.allocator,
         ir.ZSIR{
             .ret = ir.ZSIRRet{
                 .value = valueName,
                 .startPos = ret.startPos,
+                .wrapEnumName = if (wrapInfo) |info| info.enumName else null,
+                .wrapVariantTag = if (wrapInfo) |info| info.variantTag else null,
             },
         },
     );
@@ -1103,22 +1201,33 @@ fn generateEnumInit(self: *Self, ei: ast.expr.ZSEnumInit) Error![]const u8 {
 
     // Use the analyzer's enum init info which has the correct (possibly mangled) name
     const initInfo = self.enumInits.get(ei.startPos);
-    const enumName = if (initInfo) |info| info.enumName else ei.enum_name;
+    var enumName = if (initInfo) |info| info.enumName else ei.enum_name;
 
     // Find the variant tag by looking up the enum declaration in top-level instructions
     var variantTag: u32 = if (initInfo) |info| info.variantTag else 0;
     if (initInfo == null) {
         var tagFound = false;
-        for (self.topLevelInstructions.items) |inst| {
-            if (inst == .enum_decl and std.mem.eql(u8, inst.enum_decl.name, enumName)) {
-                for (inst.enum_decl.variants) |v| {
-                    if (std.mem.eql(u8, v.name, ei.variant_name)) {
-                        variantTag = v.tag;
-                        tagFound = true;
-                        break;
-                    }
+        if (self.currentFunctionReturnType) |retEnumName| {
+            if (self.findEnumVariantMatch(retEnumName, ei.variant_name)) |match| {
+                enumName = match.enumName;
+                variantTag = match.variantTag;
+                tagFound = true;
+            }
+        }
+        if (!tagFound) {
+            if (self.findEnumVariantMatch(enumName, ei.variant_name)) |match| {
+                enumName = match.enumName;
+                variantTag = match.variantTag;
+                tagFound = true;
+            }
+        }
+        if (!tagFound) {
+            if (self.currentFunctionReturnType) |retEnumName| {
+                if (commonEnumVariantTag(retEnumName, ei.variant_name)) |tag| {
+                    enumName = retEnumName;
+                    variantTag = tag;
+                    tagFound = true;
                 }
-                break;
             }
         }
         if (!tagFound) {
@@ -1350,18 +1459,35 @@ fn generateSafeNav(self: *Self, sn: ast.expr.ZSSafeNav) Error![]const u8 {
         }
     }
 
-    // Build Some arm body: field_access on the payload, optionally wrap in Some
+    // Build Some arm body: field access or extension call on the payload, optionally wrap in Some
     var someBody = try std.ArrayList(ir.ZSIR).initCapacity(self.allocator, 4);
     defer someBody.deinit(self.allocator);
 
     const bindingName = try self.generateName();
     const fieldResultName = try self.generateName();
-    try someBody.append(self.allocator, ir.ZSIR{ .field_access = .{
-        .resultName = fieldResultName,
-        .subject = bindingName,
-        .field = sn.field,
-        .fieldIndex = snInfo.fieldIndex,
-    } });
+    if (snInfo.callName) |callName| {
+        const callArgLen: usize = if (sn.call_args) |callArgs| callArgs.len else 0;
+        const argNames = try self.allocator.alloc([]const u8, callArgLen + 1);
+        argNames[0] = bindingName;
+        if (sn.call_args) |callArgs| {
+            for (callArgs, 0..) |arg, i| {
+                argNames[i + 1] = try self.generateExpr(arg);
+            }
+        }
+        try someBody.append(self.allocator, ir.ZSIR{ .call = .{
+            .resultName = fieldResultName,
+            .fnName = callName,
+            .argNames = argNames,
+            .startPos = sn.startPos,
+        } });
+    } else {
+        try someBody.append(self.allocator, ir.ZSIR{ .field_access = .{
+            .resultName = fieldResultName,
+            .subject = bindingName,
+            .field = sn.field,
+            .fieldIndex = snInfo.fieldIndex,
+        } });
+    }
 
     const someArmResult: []const u8 = if (snInfo.isFlatMap)
         fieldResultName
@@ -1576,7 +1702,7 @@ fn generateAssign(self: *Self, value: ir.ZSIRValue, startPos: usize) Error![]con
 }
 
 fn generateName(self: *Self) Error![]const u8 {
-    const name = try std.fmt.allocPrint(self.allocator, "x{}", .{self.nameCount});
+    const name = try std.fmt.allocPrint(self.allocator, "{s}x{}", .{ self.namePrefix, self.nameCount });
     self.nameCount += 1;
     return name;
 }

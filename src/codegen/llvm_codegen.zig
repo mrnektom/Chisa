@@ -277,6 +277,7 @@ fn getInstrStartPos(instr: *const ir.ZSIR) usize {
         .call => |c| c.startPos,
         .ret => |r| r.startPos,
         .branch => |b| b.startPos,
+        .cast => |c| c.startPos,
         else => 0,
     };
 }
@@ -305,10 +306,11 @@ fn generateInstruction(
         .call => try generateCall(builder, module, locals, instruction.call, allocator),
         .fn_decl => try generateFnDecl(module, instruction.fn_decl, allocator),
         .fn_def => {}, // fn_def handled with globals in generateLLVMModule
-        .ret => generateRet(builder, locals, instruction.ret),
+        .ret => try generateRet(builder, locals, instruction.ret, allocator),
         .branch => try generateBranch(builder, module, locals, instruction.branch, allocator, loopCtx),
         .compare => try generateCompare(builder, locals, instruction.compare, allocator),
         .arith => try generateArith(builder, locals, instruction.arith, allocator),
+        .cast => try generateCast(builder, locals, instruction.cast),
         .loop => try generateLoop(builder, module, locals, instruction.loop, allocator, loopCtx),
         .module_init => try generateModuleInit(builder, module, instruction.module_init, allocator),
         .array_init => try generateArrayInit(builder, locals, instruction.array_init),
@@ -537,7 +539,8 @@ fn generateRet(
     builder: types.LLVMBuilderRef,
     locals: *std.StringHashMap(LocalVar),
     ret: ir.ZSIRRet,
-) void {
+    allocator: std.mem.Allocator,
+) !void {
     if (ret.value) |valName| {
         if (locals.get(valName)) |local| {
             var val = core.LLVMBuildLoad2(builder, local.ty, local.ptr, "retval");
@@ -545,6 +548,37 @@ fn generateRet(
             const currentFunc = core.LLVMGetBasicBlockParent(core.LLVMGetInsertBlock(builder));
             const funcType = core.LLVMGlobalGetValueType(currentFunc);
             const expectedRetType = core.LLVMGetReturnType(funcType);
+            if (ret.wrapEnumName) |enumName| {
+                const nameZ = try allocator.dupeZ(u8, enumName);
+                defer allocator.free(nameZ);
+
+                const wrappedEnumType = core.LLVMGetTypeByName2(core.LLVMGetGlobalContext(), nameZ.ptr) orelse expectedRetType;
+                var enumVal = core.LLVMGetUndef(wrappedEnumType);
+                enumVal = core.LLVMBuildInsertValue(builder, enumVal, core.LLVMConstInt(core.LLVMInt32Type(), ret.wrapVariantTag orelse 0, 0), 0, "ret_withtag");
+
+                const payloadType = core.LLVMStructGetTypeAtIndex(wrappedEnumType, 1);
+                if (local.ty != payloadType) {
+                    const expectedKind = core.LLVMGetTypeKind(payloadType);
+                    const actualKind = core.LLVMGetTypeKind(local.ty);
+                    if (expectedKind == .LLVMIntegerTypeKind and actualKind == .LLVMIntegerTypeKind) {
+                        const expectedWidth = core.LLVMGetIntTypeWidth(payloadType);
+                        const actualWidth = core.LLVMGetIntTypeWidth(local.ty);
+                        if (actualWidth < expectedWidth) {
+                            val = core.LLVMBuildSExt(builder, val, payloadType, "ret_payext");
+                        } else if (actualWidth > expectedWidth) {
+                            val = core.LLVMBuildTrunc(builder, val, payloadType, "ret_paytrunc");
+                        }
+                    } else {
+                        const slotPtr = core.LLVMBuildAlloca(builder, payloadType, "ret_pay_slot");
+                        _ = core.LLVMBuildStore(builder, core.LLVMConstNull(payloadType), slotPtr);
+                        const payloadPtrType = core.LLVMPointerType(local.ty, 0);
+                        const payloadSlotPtr = core.LLVMBuildBitCast(builder, slotPtr, payloadPtrType, "ret_pay_slot_cast");
+                        _ = core.LLVMBuildStore(builder, val, payloadSlotPtr);
+                        val = core.LLVMBuildLoad2(builder, payloadType, slotPtr, "ret_pay_reint");
+                    }
+                }
+                val = core.LLVMBuildInsertValue(builder, enumVal, val, 1, "ret_withpayload");
+            }
             if (core.LLVMGetTypeKind(local.ty) == .LLVMIntegerTypeKind and
                 core.LLVMGetTypeKind(expectedRetType) == .LLVMIntegerTypeKind and
                 local.ty != expectedRetType)
@@ -564,6 +598,7 @@ fn generateRet(
     } else {
         _ = core.LLVMBuildRetVoid(builder);
     }
+    return;
 }
 
 fn generateBranch(
@@ -780,6 +815,53 @@ fn generateArith(
     const ptr = core.LLVMBuildAlloca(builder, resultTy, "arithres");
     _ = core.LLVMBuildStore(builder, result, ptr);
     try locals.put(arithInst.resultName, LocalVar{ .ptr = ptr, .ty = resultTy });
+}
+
+fn coerceIntegerValue(
+    builder: types.LLVMBuilderRef,
+    value: types.LLVMValueRef,
+    sourceType: types.LLVMTypeRef,
+    targetType: types.LLVMTypeRef,
+    name: [*:0]const u8,
+) types.LLVMValueRef {
+    if (sourceType == targetType) return value;
+
+    const sourceKind = core.LLVMGetTypeKind(sourceType);
+    const targetKind = core.LLVMGetTypeKind(targetType);
+    if (sourceKind != .LLVMIntegerTypeKind or targetKind != .LLVMIntegerTypeKind) return value;
+
+    const sourceWidth = core.LLVMGetIntTypeWidth(sourceType);
+    const targetWidth = core.LLVMGetIntTypeWidth(targetType);
+
+    if (targetWidth == 1 and sourceWidth > 1) {
+        return core.LLVMBuildICmp(builder, .LLVMIntNE, value, core.LLVMConstInt(sourceType, 0, 0), name);
+    }
+    if (sourceWidth == 1 and targetWidth > 1) {
+        return core.LLVMBuildZExt(builder, value, targetType, name);
+    }
+    if (sourceWidth < targetWidth) {
+        return core.LLVMBuildSExt(builder, value, targetType, name);
+    }
+    if (sourceWidth > targetWidth) {
+        return core.LLVMBuildTrunc(builder, value, targetType, name);
+    }
+    return value;
+}
+
+fn generateCast(
+    builder: types.LLVMBuilderRef,
+    locals: *std.StringHashMap(LocalVar),
+    castInst: ir.ZSIRCast,
+) !void {
+    const operandLocal = locals.get(castInst.operand) orelse return;
+    const targetType = mapType(castInst.targetType);
+    var value = core.LLVMBuildLoad2(builder, operandLocal.ty, operandLocal.ptr, "castval");
+
+    value = coerceIntegerValue(builder, value, operandLocal.ty, targetType, "cast");
+
+    const ptr = core.LLVMBuildAlloca(builder, targetType, "castres");
+    _ = core.LLVMBuildStore(builder, value, ptr);
+    try locals.put(castInst.resultName, LocalVar{ .ptr = ptr, .ty = targetType });
 }
 
 fn generateLoop(
@@ -1310,7 +1392,7 @@ fn generateAsmBlock(
     }
 
     // Build constraint string: =outputs, inputs, clobbers
-    var constraint: std.ArrayListUnmanaged(u8) = .{};
+    var constraint: std.ArrayListUnmanaged(u8) = .empty;
     defer constraint.deinit(allocator);
 
     for (asmBlock.outputs) |out| {
@@ -1345,7 +1427,7 @@ fn generateAsmBlock(
     }
 
     // Build instruction string
-    var asmStr: std.ArrayListUnmanaged(u8) = .{};
+    var asmStr: std.ArrayListUnmanaged(u8) = .empty;
     defer asmStr.deinit(allocator);
     for (asmBlock.instructions, 0..) |inst, i| {
         if (i > 0) try asmStr.append(allocator, '\n');
@@ -1681,7 +1763,7 @@ fn generateIndexAccess(
 
         // Stride-aware: if elemType is set, use typed element size
         if (ia.elemType) |et| {
-            if (isPointerTypeName(et)) {
+            if (shouldByteAddressRawPointer(et)) {
                 const sum = core.LLVMBuildAdd(builder, addr, idx64, "ptradd");
                 const i8PtrType = core.LLVMPointerType(core.LLVMInt8Type(), 0);
                 const rawPtr = core.LLVMBuildIntToPtr(builder, sum, i8PtrType, "rawptr");
@@ -1748,7 +1830,7 @@ fn generateIndexAccess(
                 break :blk subjectVal;
             };
             const idx64 = core.LLVMBuildSExt(builder, indexVal, i64Type, "idx64");
-            const fallbackToByte = if (ia.elemType) |et| isPointerTypeName(et) else false;
+            const fallbackToByte = shouldByteAddressRawPointer(ia.elemType);
             const llvmElemType = if (fallbackToByte) core.LLVMInt8Type() else if (ia.elemType) |et| mapType(et) else core.LLVMInt8Type();
             const elemSize: u64 = getTypeSizeBytes(llvmElemType);
             const offset = core.LLVMBuildMul(builder, idx64, core.LLVMConstInt(i64Type, elemSize, 0), "offset");
@@ -1810,7 +1892,7 @@ fn generateIndexStore(
 
         // Stride-aware: if elemType is set, use typed element size
         if (istor.elemType) |et| {
-            if (isPointerTypeName(et)) {
+            if (shouldByteAddressRawPointer(et)) {
                 const sum = core.LLVMBuildAdd(builder, addr, idx64, "ptradd");
                 const i8PtrType = core.LLVMPointerType(core.LLVMInt8Type(), 0);
                 const rawPtr = core.LLVMBuildIntToPtr(builder, sum, i8PtrType, "rawptr");
@@ -1904,7 +1986,7 @@ fn generateIndexStore(
                 break :blk subjectVal;
             };
             const idx64 = core.LLVMBuildSExt(builder, indexVal, i64Type, "idx64");
-            const fallbackToByte = if (istor.elemType) |et| isPointerTypeName(et) else false;
+            const fallbackToByte = shouldByteAddressRawPointer(istor.elemType);
             const llvmElemType = if (fallbackToByte) core.LLVMInt8Type() else if (istor.elemType) |et| mapType(et) else core.LLVMInt8Type();
             const elemSize: u64 = getTypeSizeBytes(llvmElemType);
             const offset = core.LLVMBuildMul(builder, idx64, core.LLVMConstInt(i64Type, elemSize, 0), "offset");
@@ -1974,19 +2056,29 @@ fn generateEnumDeclCodegen(
 ) !void {
     _ = module;
 
-    // Find the max-size payload type to determine the enum struct layout: { i32_tag, payload }
-    // This supports heterogeneous payloads (e.g., Result<number, String>)
+    // Find a payload slot type for the enum layout: { i32_tag, payload }.
+    // If every payload variant has the same concrete type, keep that type.
+    // Otherwise use a raw integer storage slot large enough to hold the largest payload.
     var maxPayloadSize: u64 = 0;
     var payloadType: ?types.LLVMTypeRef = null;
+    var firstPayloadType: ?types.LLVMTypeRef = null;
+    var allPayloadTypesMatch = true;
     for (decl.variants) |v| {
         if (v.payloadType) |pt| {
             const llvmType = mapType(pt);
             const size = getTypeSizeBytes(llvmType);
             if (size > maxPayloadSize) {
                 maxPayloadSize = size;
-                payloadType = llvmType;
+            }
+            if (firstPayloadType == null) {
+                firstPayloadType = llvmType;
+            } else if (firstPayloadType.? != llvmType) {
+                allPayloadTypesMatch = false;
             }
         }
+    }
+    if (firstPayloadType) |first| {
+        payloadType = if (allPayloadTypesMatch) first else core.LLVMIntType(@intCast(maxPayloadSize * 8));
     }
 
     // Create a named struct type: { i32, <payload_type> }
@@ -2057,21 +2149,21 @@ fn generateEnumInitCodegen(
                 }
             } else if (payloadLocal.ty != expectedType) {
                 // Heterogeneous payload types: use a zero-initialised slot of the expected
-                // (union slot) type, copy the payload bytes in, then reload.
-                // If the payload integer is WIDER than the slot (e.g. i64 fd into %FsError {i32}),
-                // truncate first so we don't overflow the stack allocation.
+                // (union slot) type, bitcast the slot pointer to the payload pointer type,
+                // store through that view, then reload the slot as the expected type.
                 const slotPtr = core.LLVMBuildAlloca(builder, expectedType, "pay_slot");
                 _ = core.LLVMBuildStore(builder, core.LLVMConstNull(expectedType), slotPtr);
-                const slotSize = getTypeSizeBytes(expectedType);
                 var storeVal = payloadVal;
                 if (actualKind == .LLVMIntegerTypeKind) {
                     const actualWidth = core.LLVMGetIntTypeWidth(payloadLocal.ty);
-                    const slotBits: u32 = @intCast(slotSize * 8);
+                    const slotBits = core.LLVMGetIntTypeWidth(expectedType);
                     if (actualWidth > slotBits) {
                         storeVal = core.LLVMBuildTrunc(builder, payloadVal, core.LLVMIntType(slotBits), "pay_trunc");
                     }
                 }
-                _ = core.LLVMBuildStore(builder, storeVal, slotPtr);
+                const payloadPtrType = core.LLVMPointerType(payloadLocal.ty, 0);
+                const payloadSlotPtr = core.LLVMBuildBitCast(builder, slotPtr, payloadPtrType, "pay_slot_cast");
+                _ = core.LLVMBuildStore(builder, storeVal, payloadSlotPtr);
                 castVal = core.LLVMBuildLoad2(builder, expectedType, slotPtr, "pay_reint");
             }
             enumVal = core.LLVMBuildInsertValue(builder, enumVal, castVal, 1, "withpayload");
@@ -2255,14 +2347,18 @@ fn getTypeSizeBytes(ty: types.LLVMTypeRef) u64 {
     // As a simpler approach, match known types by kind.
     if (kind == .LLVMPointerTypeKind) return 8; // pointers are 64-bit
     if (kind == .LLVMStructTypeKind) {
-        // Sum field sizes (approximation without padding — good enough for packed-style access)
         const fieldCount = core.LLVMCountStructElementTypes(ty);
-        var total: u64 = 0;
+        var offset: u64 = 0;
+        var maxAlign: u64 = 1;
         var i: c_uint = 0;
         while (i < fieldCount) : (i += 1) {
-            total += getTypeSizeBytes(core.LLVMStructGetTypeAtIndex(ty, i));
+            const fieldSize = getTypeSizeBytes(core.LLVMStructGetTypeAtIndex(ty, i));
+            const fieldAlign = @min(@max(fieldSize, 1), 8);
+            if (fieldAlign > maxAlign) maxAlign = fieldAlign;
+            offset = std.mem.alignForward(u64, offset, fieldAlign);
+            offset += fieldSize;
         }
-        return if (total > 0) total else 1;
+        return if (offset > 0) std.mem.alignForward(u64, offset, maxAlign) else 1;
     }
     return 1;
 }
@@ -2274,6 +2370,11 @@ fn isPointerTypeName(name: []const u8) bool {
         std.mem.startsWith(u8, name, "pointer<") or
         std.mem.startsWith(u8, name, "Pointer__") or
         std.mem.startsWith(u8, name, "pointer__");
+}
+
+fn shouldByteAddressRawPointer(elemType: ?[]const u8) bool {
+    const et = elemType orelse return true;
+    return isPointerTypeName(et) or std.mem.eql(u8, et, "unknown");
 }
 
 fn mapType(name: []const u8) types.LLVMTypeRef {
@@ -2340,12 +2441,10 @@ fn getValue(builder: types.LLVMBuilderRef, value: *const ir.ZSIRValue) !types.LL
 
 fn getStringValue(builder: types.LLVMBuilderRef, value: [*:0]const u8) !types.LLVMValueRef {
     const zStr: []const u8 = std.mem.span(value);
-    const arrTy = core.LLVMArrayType(core.LLVMInt8Type(), @intCast(zStr.len));
-    const ptr = core.LLVMBuildAlloca(builder, arrTy, "strVal");
-    const str = core.LLVMConstString(value, @intCast(zStr.len), 1);
-    _ = core.LLVMBuildStore(builder, str, ptr);
-    // Convert pointer to i64 for the { i32, i64 } string struct
-    const ptrInt = core.LLVMBuildPtrToInt(builder, ptr, core.LLVMInt64Type(), "strptrint");
+    const globalPtr = core.LLVMBuildGlobalStringPtr(builder, value, "strlit");
+    // String literals must have static storage so returned String values do not
+    // point at a dead stack allocation after the callee returns.
+    const ptrInt = core.LLVMBuildPtrToInt(builder, globalPtr, core.LLVMInt64Type(), "strptrint");
     const strType = getStringType();
     var strVal = core.LLVMGetUndef(strType);
     strVal = core.LLVMBuildInsertValue(builder, strVal, core.LLVMConstInt(core.LLVMInt32Type(), zStr.len, 0), 0, "withlen");

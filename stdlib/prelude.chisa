@@ -17,8 +17,6 @@ scalar char
 external fn loadLibrary(path: String): void
 
 
-
-
 export fn numberToString(n: number): String {
   let buf = ['\0'; 20]
   let pos = 19

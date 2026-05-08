@@ -42,13 +42,7 @@
     {
       "root": "src/nodemodule.zig",
       "public": false,
-      "imports": [
-        {
-          "name": "napi",
-          "owner": 1,
-          "module": 0
-        }
-      ]
+      "imports": []
     },
     {
       "root": "src/main.zig",
@@ -67,20 +61,11 @@
       "imports": []
     }
   ],
-  "dependencies": [
-    {
-      "project": 1,
-      "lazy": false
-    },
-    {
-      "project": 3,
-      "lazy": false
-    }
-  ]
+  "dependencies": []
 }]]><![CDATA[{
   "name": "napi",
   "version": "0.2.0",
-  "path": "/home/nektom/.cache/zig/p/napi-0.2.0-wOM5BQ6GAADgWsxC0vMPcrXDhTuT7XPgWOw53N8fFIxh",
+  "path": "/home/nektom/IdeaProjects/ZenScript/zig-pkg/napi-0.2.0-wOM5BQ6GAADgWsxC0vMPcrXDhTuT7XPgWOw53N8fFIxh",
   "steps": [
     {
       "name": "install",
@@ -102,58 +87,29 @@
     {
       "root": "src/root.zig",
       "public": true,
-      "imports": [
-        {
-          "name": "napi",
-          "owner": 1,
-          "module": 0
-        }
-      ]
+      "imports": []
     },
     {
       "root": "examples/hello.zig",
       "public": false,
-      "imports": [
-        {
-          "name": "napi",
-          "owner": 1,
-          "module": 0
-        }
-      ]
+      "imports": []
     },
     {
       "root": "examples/function.zig",
       "public": false,
-      "imports": [
-        {
-          "name": "napi",
-          "owner": 1,
-          "module": 0
-        }
-      ]
+      "imports": []
     },
     {
       "root": "tests/main.zig",
       "public": false,
-      "imports": [
-        {
-          "name": "napi",
-          "owner": 1,
-          "module": 0
-        }
-      ]
+      "imports": []
     }
   ],
-  "dependencies": [
-    {
-      "project": 2,
-      "lazy": false
-    }
-  ]
+  "dependencies": []
 }]]><![CDATA[{
   "name": "napi_headers",
   "version": null,
-  "path": "/home/nektom/.cache/zig/p/N-V-__8AAASNAQA0UI0mvQk4LyFEhdFuFBPgH8HSokdFFpnz",
+  "path": "/home/nektom/IdeaProjects/ZenScript/zig-pkg/N-V-__8AAASNAQA0UI0mvQk4LyFEhdFuFBPgH8HSokdFFpnz",
   "steps": [
     {
       "name": "install",
@@ -171,7 +127,7 @@
 }]]><![CDATA[{
   "name": "llvm_zig",
   "version": "1.0.0",
-  "path": "/home/nektom/.cache/zig/p/llvm_zig-1.0.0-IXgkxLRjBADjVMy_FbE6b-jOjr-CB-Q1iOl-xCQk9l4Q",
+  "path": "/home/nektom/IdeaProjects/ZenScript/zig-pkg/llvm_zig-1.0.0-IXgkxLRjBADjVMy_FbE6b-jOjr-CB-Q1iOl-xCQk9l4Q",
   "steps": [
     {
       "name": "install",
@@ -203,36 +159,19 @@
     {
       "root": "src/llvm-bindings.zig",
       "public": false,
-      "imports": [
-        {
-          "name": "llvm",
-          "owner": 3,
-          "module": 0
-        }
-      ]
+      "imports": []
     },
     {
       "root": "src/clang.zig",
       "public": false,
-      "imports": [
-        {
-          "name": "clang",
-          "owner": 3,
-          "module": 1
-        }
-      ]
+      "imports": []
     }
   ],
-  "dependencies": [
-    {
-      "project": 4,
-      "lazy": false
-    }
-  ]
+  "dependencies": []
 }]]><![CDATA[{
   "name": "test_runner",
   "version": null,
-  "path": "/home/nektom/.cache/zig/p/N-V-__8AAHMkAAC4CUVVTX0UMBJXtfOubskbF9EJ7X6qAGYR",
+  "path": "/home/nektom/IdeaProjects/ZenScript/zig-pkg/N-V-__8AAHMkAAC4CUVVTX0UMBJXtfOubskbF9EJ7X6qAGYR",
   "steps": [
     {
       "name": "install",

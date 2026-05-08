@@ -18,6 +18,12 @@ data class ProjectSymbol(val element: ChisaNamedElement, val relativePath: Strin
 
 object ChisaResolveUtil {
     private val LOG = Logger.getInstance(ChisaResolveUtil::class.java)
+
+    fun dereferenceImportedElement(element: PsiElement?): PsiElement? = when (element) {
+        is ChisaImportSymbol -> element.reference.resolve()
+        else -> element
+    }
+
     fun resolveInScope(from: PsiElement, name: String): PsiElement? {
         var current: PsiElement? = from.parent
         while (current != null) {
@@ -27,7 +33,9 @@ object ChisaResolveUtil {
                 // unless we're at file level (forward references allowed)
                 if (child === from || PsiTreeUtil.isAncestor(child, from, false)) break
                 if (child is ChisaNamedElement && child.name == name) {
-                    return child
+                    val resolved = dereferenceImportedElement(child)
+                    if (resolved != null) return resolved
+                    if (child !is ChisaImportSymbol) return child
                 }
             }
 
@@ -35,7 +43,9 @@ object ChisaResolveUtil {
             if (current === from.containingFile) {
                 for (child in current.children) {
                     if (child is ChisaNamedElement && child.name == name) {
-                        return child
+                        val resolved = dereferenceImportedElement(child)
+                        if (resolved != null) return resolved
+                        if (child !is ChisaImportSymbol) return child
                     }
                 }
             }
@@ -97,9 +107,15 @@ object ChisaResolveUtil {
     }
 
     fun resolveImportPath(context: PsiElement, path: String): ChisaFile? {
-        val containingFile = context.containingFile?.virtualFile ?: return null
+        val containingFile = context.containingFile?.originalFile?.virtualFile
+            ?: context.containingFile?.virtualFile
+            ?: context.containingFile?.viewProvider?.virtualFile
+            ?: return null
         val dir = containingFile.parent ?: return null
-        val targetVFile = dir.findFileByRelativePath(path) ?: return null
+        val normalizedPath = path.removePrefix("./")
+        val targetVFile = dir.findFileByRelativePath(path)
+            ?: dir.findFileByRelativePath(normalizedPath)
+            ?: return null
         val psiFile = PsiManager.getInstance(context.project).findFile(targetVFile)
         return psiFile as? ChisaFile
     }
@@ -196,7 +212,9 @@ object ChisaResolveUtil {
     private fun resolveInLocalScope(file: PsiFile, name: String): PsiElement? {
         for (child in file.children) {
             if (child is ChisaNamedElement && child.name == name) {
-                return child
+                val resolved = dereferenceImportedElement(child)
+                if (resolved != null) return resolved
+                if (child !is ChisaImportSymbol) return child
             }
         }
         return null
@@ -389,6 +407,13 @@ object ChisaResolveUtil {
         }
     }
 
+    fun collectPreludeVisibleElements(project: com.intellij.openapi.project.Project): List<ChisaNamedElement> {
+        val result = mutableListOf<ChisaNamedElement>()
+        val seen = LinkedHashSet<String>()
+        collectPreludeVariantElements(project, result, seen)
+        return result
+    }
+
     fun collectProjectExportedSymbols(from: PsiFile, alreadySeen: Set<String>): List<ProjectSymbol> {
         val project = from.project
         val currentVFile = from.virtualFile ?: run {
@@ -404,7 +429,7 @@ object ChisaResolveUtil {
         for (root in roots) {
             LOG.debug("Chisa project completion: scanning root = ${root.path}")
             VfsUtilCore.iterateChildrenRecursively(root, null) { vFile ->
-                if (!vFile.isDirectory && vFile.extension == "zs" && vFile != currentVFile) {
+                if (!vFile.isDirectory && vFile.extension == "chisa" && vFile != currentVFile) {
                     LOG.debug("Chisa project completion: found .chisa file = ${vFile.path}")
                     val relativePath = computeRelativePath(currentVFile, vFile)
                     if (relativePath != null) {
@@ -437,7 +462,7 @@ object ChisaResolveUtil {
         val roots = ProjectRootManager.getInstance(project).contentRoots
         for (root in roots) {
             VfsUtilCore.iterateChildrenRecursively(root, null) { vFile ->
-                if (!vFile.isDirectory && vFile.extension == "zs" && vFile != from) {
+                if (!vFile.isDirectory && vFile.extension == "chisa" && vFile != from) {
                     val rel = computeRelativePath(from, vFile)
                     if (rel != null) result.add(vFile to rel)
                 }

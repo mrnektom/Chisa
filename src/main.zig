@@ -5,19 +5,16 @@ const Tokenizer = @import("tokens/tokenizer.zig");
 const Pipline = @import("pipeline.zig");
 const llvm = @import("codegen/llvm_codegen.zig");
 
-pub fn main() !void {
-    const args = Args.collectArgs() catch |err| {
+pub fn main(init: std.process.Init) !void {
+    const argv = try init.minimal.args.toSlice(init.arena.allocator());
+    const args = Args.collectArgs(argv) catch |err| {
         switch (err) {
             error.MissingEntryPoint => std.debug.print("Error: no input file specified. Usage: zenscript -i <file.zs>\n", .{}),
         }
         return;
     };
 
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    const allocator = gpa.allocator();
-    defer _ = gpa.deinit();
-
-    var pipline = try Pipline.init(allocator);
+    var pipline = try Pipline.init(init.gpa, init.io);
     defer pipline.deinit();
     try pipline.compile(args);
 }
@@ -31,12 +28,13 @@ test "simple test" {
 }
 
 test "fuzz example" {
-    const Context = struct {
-        fn testOne(context: @This(), input: []const u8) anyerror!void {
-            _ = context;
-            // Try passing `--fuzz` to `zig build test` and see if it manages to fail this test case!
-            try std.testing.expect(!std.mem.eql(u8, "canyoufindme", input));
-        }
-    };
-    try std.testing.fuzz(Context{}, Context.testOne, .{});
+    try std.testing.fuzz({}, testOne, .{});
+}
+
+fn testOne(context: void, smith: *std.testing.Smith) !void {
+    _ = context;
+    var buf: [32]u8 = undefined;
+    const len = smith.valueRangeAtMost(u8, 0, buf.len);
+    smith.bytes(buf[0..len]);
+    try std.testing.expect(!std.mem.eql(u8, "canyoufindme", buf[0..len]));
 }

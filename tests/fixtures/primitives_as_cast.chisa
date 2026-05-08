@@ -1,0 +1,12 @@
+type Small = byte
+
+fn main(): number {
+    let small = 7 as Small
+    let widened = small as long
+    let narrowed = widened as short
+    let flag = narrowed as boolean
+    let encoded = flag as number
+    let letter = 65 as char
+    let code = letter as number
+    return encoded + code
+}

@@ -1,0 +1,9 @@
+import { Either } from "../../stdlib/Either.chisa"
+import { resolveIpv4 } from "../../stdlib/io/net.chisa"
+
+let result = resolveIpv4("google.com")
+
+match result {
+  Either.Right(_) -> print("ok"),
+  Either.Left(err) -> print(err.toString())
+}

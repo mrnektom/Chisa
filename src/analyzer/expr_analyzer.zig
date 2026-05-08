@@ -14,6 +14,7 @@ pub fn analyzeExpr(self: anytype, expr: ast.expr.ZSExpr) Error!Symbol.ZSTypeNota
         .string => try type_resolver.getStringStructType(self),
         .char => Symbol.ZSTypeNotation.char,
         .boolean => Symbol.ZSTypeNotation.boolean,
+        .cast => analyzeCast(self, expr.cast),
         .call => self.analyzeCall(expr.call),
         .reference => analyzeReference(self, expr.reference),
         .if_expr => analyzeIfExpr(self, expr.if_expr),
@@ -34,6 +35,31 @@ pub fn analyzeExpr(self: anytype, expr: ast.expr.ZSExpr) Error!Symbol.ZSTypeNota
         .lambda => analyzeLambda(self, expr.lambda),
         .safe_nav => analyzeSafeNav(self, expr.safe_nav),
     };
+}
+
+pub fn analyzeCast(self: anytype, cast: ast.expr.ZSCast) Error!Symbol.ZSTypeNotation {
+    const savedExpected = self.expectedType;
+    self.expectedType = null;
+    const sourceType = try self.analyzeExpr(cast.expr.*);
+    self.expectedType = savedExpected;
+
+    const targetType = try type_resolver.resolveTypeAnnotationFull(self, cast.target_type);
+
+    if (!type_resolver.isPrimitiveScalarType(sourceType)) {
+        try self.recordError(cast, "left side of 'as' must be a primitive scalar type");
+    }
+    if (!type_resolver.isPrimitiveScalarType(targetType)) {
+        try self.recordError(cast, "target type of 'as' must be a primitive scalar type");
+    }
+
+    if (type_resolver.isPrimitiveScalarType(sourceType) and type_resolver.isPrimitiveScalarType(targetType)) {
+        try self.primitiveCastInfo.put(cast.endPos, .{
+            .sourceType = type_resolver.typeToString(sourceType),
+            .targetType = type_resolver.typeToString(targetType),
+        });
+    }
+
+    return targetType;
 }
 
 pub fn analyzeLambda(self: anytype, lambda: ast.expr.ZSLambda) Error!Symbol.ZSTypeNotation {
@@ -150,16 +176,32 @@ pub fn analyzeReference(self: anytype, ref: ast.expr.ZSReference) Error!Symbol.Z
 
 pub fn analyzeIfExpr(self: anytype, ifExpr: ast.expr.ZSIfExpr) Error!Symbol.ZSTypeNotation {
     _ = try self.analyzeExpr(ifExpr.condition.*);
-    const thenType = try self.analyzeExpr(ifExpr.then_branch.*);
+    const savedExpected = self.expectedType;
+    const thenType = blk: {
+        defer self.expectedType = savedExpected;
+        const result = try self.analyzeExpr(ifExpr.then_branch.*);
+        break :blk result;
+    };
     if (ifExpr.else_branch) |eb| {
+        self.expectedType = savedExpected;
         const elseType = try self.analyzeExpr(eb.*);
+        self.expectedType = savedExpected;
+        // Statement-style branches often analyze to `.unknown`; returning `.void`
+        // avoids cascading "Expression type could not be resolved" errors.
+        if (thenType == .unknown or elseType == .unknown) {
+            return .void;
+        }
         if (thenType != .unknown and elseType != .unknown and
             !type_resolver.typesCompatible(thenType, elseType) and !type_resolver.typesCompatible(elseType, thenType))
         {
             try self.recordError(ifExpr, "if/else branches have incompatible types");
         }
+        return thenType;
     }
-    return thenType;
+    if (!self.statementExprContext) {
+        try self.recordError(ifExpr, "if expression used as a value must have an else branch");
+    }
+    return Symbol.ZSTypeNotation.void;
 }
 
 pub fn analyzeWhileExpr(self: anytype, whileExpr: ast.expr.ZSWhileExpr) Error!Symbol.ZSTypeNotation {
@@ -277,7 +319,7 @@ pub fn analyzeBlock(self: anytype, block: ast.expr.ZSBlock) Error!Symbol.ZSTypeN
     try self.tableStack.enterScope(&blockScope);
 
     var lastType: Symbol.ZSTypeNotation = .unknown;
-    for (block.stmts) |node| {
+    for (block.stmts, 0..) |node, i| {
         switch (node) {
             .stmt => {
                 if (try self.analyzeStmt(node.stmt)) |symbol| {
@@ -286,6 +328,9 @@ pub fn analyzeBlock(self: anytype, block: ast.expr.ZSBlock) Error!Symbol.ZSTypeN
                 lastType = .unknown;
             },
             .expr => {
+                const savedStatementContext = self.statementExprContext;
+                self.statementExprContext = i + 1 < block.stmts.len;
+                defer self.statementExprContext = savedStatementContext;
                 lastType = try self.analyzeExpr(node.expr);
             },
             .import_decl => {
@@ -316,6 +361,23 @@ pub fn analyzeReturn(self: anytype, ret: ast.expr.ZSReturn) Error!Symbol.ZSTypeN
         }
         const result = try self.analyzeExpr(v.*);
         self.expectedType = savedExpected;
+        if (self.currentFnReturnType) |rt| {
+            if (!type_resolver.typesCompatible(rt, result)) {
+                if (rt == .enum_type and std.mem.eql(u8, rt.enum_type.name, "Either") and rt.enum_type.type_args.len == 2) {
+                    const leftType = rt.enum_type.type_args[0];
+                    if (type_resolver.typesCompatible(leftType, result)) {
+                        const enumName = try type_resolver.computeEnumMangledName(self, rt.enum_type.name, rt.enum_type.type_args);
+                        try self.returnWrapInfo.put(ret.startPos, .{
+                            .enumName = enumName,
+                            .variantTag = 0,
+                        });
+                        return rt;
+                    }
+                }
+                try self.recordError(ret, "Return expression type does not match function return type");
+                return .unknown;
+            }
+        }
         return result;
     }
     return .unknown;
@@ -339,23 +401,67 @@ pub fn analyzeSafeNav(self: anytype, sn: ast.expr.ZSSafeNav) Error!Symbol.ZSType
         },
     };
 
-    // Resolve field type on the inner type (field access only for now)
-    const fieldType: Symbol.ZSTypeNotation = switch (innerType) {
-        .struct_type => |st| blk: {
-            for (st.fields, 0..) |field, i| {
-                if (std.mem.eql(u8, field.name, sn.field)) {
-                    try self.fieldIndices.put(sn.startPos, @intCast(i));
-                    break :blk field.type;
+    var fieldType: Symbol.ZSTypeNotation = .unknown;
+    var resolvedCallName: ?[]const u8 = null;
+
+    if (sn.call_args) |callArgs| {
+        const receiverTypeName = type_resolver.typeToString(innerType);
+        const key = try std.fmt.allocPrint(self.allocator, "{s}.{s}", .{ receiverTypeName, sn.field });
+        defer self.allocator.free(key);
+
+        if (self.extensionFns.get(key)) |entries| {
+            const extArgTypes = try self.allocator.alloc([]const u8, callArgs.len);
+            defer self.allocator.free(extArgTypes);
+            for (callArgs, 0..) |arg, i| {
+                const argType = try self.analyzeExpr(arg);
+                extArgTypes[i] = type_resolver.typeToString(argType);
+            }
+
+            var matched: ?@import("analyzer.zig").OverloadEntry = null;
+            for (entries.items) |entry| {
+                if (entry.argTypes.len != extArgTypes.len) continue;
+                var allMatch = true;
+                for (entry.argTypes, extArgTypes) |a, b| {
+                    if (!std.mem.eql(u8, a, b) and !(type_resolver.isNumericType(a) and type_resolver.isNumericType(b))) {
+                        allMatch = false;
+                        break;
+                    }
+                }
+                if (allMatch) {
+                    matched = entry;
+                    break;
                 }
             }
-            try self.recordError(sn, "Field not found in struct");
+
+            if (matched) |entry| {
+                fieldType = entry.retType;
+                resolvedCallName = entry.mangledName;
+            } else {
+                try self.recordError(sn, "No matching extension function overload");
+                return .unknown;
+            }
+        } else {
+            try self.recordError(sn, "Safe navigation calls currently support extension functions only");
             return .unknown;
-        },
-        else => {
-            try self.recordError(sn, "Cannot access field on non-struct type via ?.");
-            return .unknown;
-        },
-    };
+        }
+    } else {
+        fieldType = switch (innerType) {
+            .struct_type => |st| blk: {
+                for (st.fields, 0..) |field, i| {
+                    if (std.mem.eql(u8, field.name, sn.field)) {
+                        try self.fieldIndices.put(sn.startPos, @intCast(i));
+                        break :blk field.type;
+                    }
+                }
+                try self.recordError(sn, "Field not found in struct");
+                return .unknown;
+            },
+            else => {
+                try self.recordError(sn, "Cannot access field on non-struct type via ?.");
+                return .unknown;
+            },
+        };
+    }
 
     // flatMap mode: field is itself Option<U> → result is Option<U>
     // map mode:     field is plain T          → result is Option<T>
@@ -377,6 +483,7 @@ pub fn analyzeSafeNav(self: anytype, sn: ast.expr.ZSSafeNav) Error!Symbol.ZSType
         .receiverEnumName = receiverEnumName,
         .resultEnumName = resultEnumName,
         .fieldIndex = self.fieldIndices.get(sn.startPos) orelse 0,
+        .callName = resolvedCallName,
     });
 
     // Return type

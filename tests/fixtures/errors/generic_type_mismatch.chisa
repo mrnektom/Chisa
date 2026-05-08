@@ -1,0 +1,2 @@
+let a: Option<number> = Option.Some(1)
+let b: Option<boolean> = a

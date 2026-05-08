@@ -3,14 +3,16 @@ const daemon_api = @import("daemon_api");
 const Tokenizer = daemon_api.Tokenizer;
 const Parser = daemon_api.Parser;
 const Analyzer = daemon_api.Analyzer;
+const Preprocessor = daemon_api.Preprocessor;
 const Sig = daemon_api.Sig;
 const SymbolTable = daemon_api.SymbolTable;
 const ZSAstType = daemon_api.ZSAstType;
 const protocol = @import("protocol.zig");
+const testing = std.testing;
 
 /// Per-request context passed from server.zig.
 pub const Context = struct {
-    /// Path to the stdlib directory (containing prelude.zs). Null if not configured.
+    /// Path to the stdlib directory (containing prelude.chisa). Null if not configured.
     stdlib_path: ?[]const u8,
 };
 
@@ -168,46 +170,72 @@ fn analyzeDep(
     cache: *std.StringHashMap(Analyzer.AnalyzeResult),
     inProgress: *std.StringHashMap(void),
     prelude: *const PreludeInfo,
+    stdlib_path: ?[]const u8,
+    inject_prelude_into_stdlib: bool,
 ) void {
     if (cache.contains(depPath)) return;
     if (inProgress.contains(depPath)) return; // cycle
     inProgress.put(depPath, {}) catch return;
     defer _ = inProgress.remove(depPath);
 
-    const file = std.fs.cwd().openFile(depPath, .{}) catch return;
-    defer file.close();
-    const content = file.readToEndAlloc(allocator, 16 * 1024 * 1024) catch return;
-    // content is freed when arena is deinited
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const file = std.Io.Dir.cwd().openFile(io, depPath, .{}) catch return;
+    defer file.close(io);
+    var file_reader_buf: [4096]u8 = undefined;
+    var file_reader = file.reader(io, &file_reader_buf);
+    var content_list: std.ArrayList(u8) = .empty;
+    file_reader.interface.appendRemainingUnlimited(allocator, &content_list) catch return;
+    const content = content_list.items;
 
     const tokenizer = Tokenizer.create(content);
     var parser = Parser.create(allocator, tokenizer, depPath, content) catch return;
-    const module = parser.parse(allocator) catch return;
+    const rawModule = parser.parse(allocator) catch return;
+    defer allocator.free(rawModule.ast);
+
+    var ppCtx = Preprocessor.CompileTimeContext.init(allocator);
+    defer ppCtx.deinit();
+    const module = Preprocessor.preprocessModule(allocator, rawModule, &ppCtx) catch return;
 
     // Recursively resolve this dep's own deps
     var subDeps = std.StringHashMap(Analyzer.AnalyzeResult).init(allocator);
     defer subDeps.deinit();
 
     for (module.deps) |dep| {
-        const dir = std.fs.path.dirname(depPath) orelse ".";
-        const resolved = std.fs.path.join(allocator, &.{ dir, dep.path }) catch continue;
-        analyzeDep(allocator, resolved, cache, inProgress, prelude);
+        const resolved = resolveImportPath(allocator, depPath, dep.path) catch continue;
+        defer allocator.free(resolved);
+        analyzeDep(allocator, resolved, cache, inProgress, prelude, stdlib_path, inject_prelude_into_stdlib);
         if (cache.get(resolved)) |r| {
             subDeps.put(dep.path, r) catch {};
         }
     }
 
+    const depPrelude: *const PreludeInfo = if (!inject_prelude_into_stdlib and isStdlibPath(depPath, stdlib_path))
+        &PreludeInfo.empty
+    else
+        prelude;
+
     const result = Analyzer.analyzeWithPrelude(
         module,
         allocator,
         &subDeps,
-        prelude.exports,
-        prelude.overloads,
-        prelude.structDefs,
-        prelude.enumDefs,
-        prelude.genericFns,
-        prelude.scalarDefs,
+        depPrelude.exports,
+        depPrelude.overloads,
+        depPrelude.structDefs,
+        depPrelude.enumDefs,
+        depPrelude.genericFns,
+        depPrelude.scalarDefs,
     ) catch return;
-    cache.put(depPath, result) catch {};
+    const owned_dep_path = allocator.dupe(u8, depPath) catch {
+        var mutable_result = result;
+        mutable_result.deinit(allocator);
+        return;
+    };
+    cache.put(owned_dep_path, result) catch {
+        allocator.free(owned_dep_path);
+    };
 }
 
 const PreludeInfo = struct {
@@ -218,41 +246,60 @@ const PreludeInfo = struct {
     genericFns: ?*const std.StringHashMap(Analyzer.GenericFnDef),
     scalarDefs: ?*const std.StringHashMap(Sig.ZSType),
     result: ?*Analyzer.AnalyzeResult,
+    dep_cache: ?*std.StringHashMap(Analyzer.AnalyzeResult),
 
     const empty = PreludeInfo{
-        .exports = null, .overloads = null, .structDefs = null,
-        .enumDefs = null, .genericFns = null, .scalarDefs = null, .result = null,
+        .exports = null,
+        .overloads = null,
+        .structDefs = null,
+        .enumDefs = null,
+        .genericFns = null,
+        .scalarDefs = null,
+        .result = null,
+        .dep_cache = null,
     };
 };
 
-/// Load and analyze prelude.zs from `stdlib_path/prelude.zs`.
+/// Load and analyze prelude.chisa from `stdlib_path/prelude.chisa`.
 /// Returns PreludeInfo with pointers into the heap-allocated AnalyzeResult.
 fn loadPrelude(allocator: std.mem.Allocator, stdlib_path: []const u8) PreludeInfo {
-    const prelude_path = std.fs.path.join(allocator, &.{ stdlib_path, "prelude.zs" }) catch return PreludeInfo.empty;
-    // prelude_path is arena-allocated, no need to free
+    const prelude_path = std.fs.path.join(allocator, &.{ stdlib_path, "prelude.chisa" }) catch return PreludeInfo.empty;
 
-    const file = std.fs.cwd().openFile(prelude_path, .{}) catch return PreludeInfo.empty;
-    defer file.close();
-    const content = file.readToEndAlloc(allocator, 4 * 1024 * 1024) catch return PreludeInfo.empty;
+    const dep_cache = allocator.create(std.StringHashMap(Analyzer.AnalyzeResult)) catch return PreludeInfo.empty;
+    dep_cache.* = std.StringHashMap(Analyzer.AnalyzeResult).init(allocator);
+    var inProgress = std.StringHashMap(void).init(allocator);
+    defer inProgress.deinit();
+    analyzeDep(allocator, prelude_path, dep_cache, &inProgress, &PreludeInfo.empty, stdlib_path, false);
 
-    const tokenizer = Tokenizer.create(content);
-    var parser = Parser.create(allocator, tokenizer, prelude_path, content) catch return PreludeInfo.empty;
-    const module = parser.parse(allocator) catch return PreludeInfo.empty;
-
-    var empty_deps = std.StringHashMap(Analyzer.AnalyzeResult).init(allocator);
-    defer empty_deps.deinit();
-
-    const result_ptr = allocator.create(Analyzer.AnalyzeResult) catch return PreludeInfo.empty;
-    result_ptr.* = Analyzer.analyze(module, allocator, &empty_deps) catch return PreludeInfo.empty;
+    const removed = dep_cache.fetchRemove(prelude_path) orelse {
+        dep_cache.deinit();
+        allocator.destroy(dep_cache);
+        return PreludeInfo.empty;
+    };
+    allocator.free(removed.key);
+    const result_ptr = allocator.create(Analyzer.AnalyzeResult) catch {
+        var result = removed.value;
+        result.deinit(allocator);
+        var it = dep_cache.iterator();
+        while (it.next()) |entry| {
+            allocator.free(entry.key_ptr.*);
+            entry.value_ptr.deinit(allocator);
+        }
+        dep_cache.deinit();
+        allocator.destroy(dep_cache);
+        return PreludeInfo.empty;
+    };
+    result_ptr.* = removed.value;
 
     return PreludeInfo{
         .exports = &result_ptr.exports,
         .overloads = &result_ptr.overloads,
-        .structDefs = &result_ptr.exportedStructDefs,
-        .enumDefs = &result_ptr.exportedEnumDefs,
+        .structDefs = &result_ptr.structDefs,
+        .enumDefs = &result_ptr.enumDefs,
         .genericFns = &result_ptr.genericFns,
         .scalarDefs = &result_ptr.scalarDefs,
         .result = result_ptr,
+        .dep_cache = dep_cache,
     };
 }
 
@@ -264,9 +311,10 @@ fn runAnalyzer(
     content: []const u8,
     ctx: Context,
 ) !?Analyzer.AnalyzeResult {
-    // Load prelude if stdlib path is configured, but not when analyzing the prelude itself.
+    // Load prelude for entry analysis whenever available, except when analyzing
+    // the prelude itself. This matches the normal compiler entrypoint behavior.
     const is_prelude = if (ctx.stdlib_path) |sp| blk: {
-        const prelude_path = std.fs.path.join(allocator, &.{ sp, "prelude.zs" }) catch break :blk false;
+        const prelude_path = std.fs.path.join(allocator, &.{ sp, "prelude.chisa" }) catch break :blk false;
         break :blk std.mem.eql(u8, filename, prelude_path);
     } else false;
 
@@ -277,17 +325,34 @@ fn runAnalyzer(
         r.deinit(allocator);
         allocator.destroy(r);
     };
+    defer if (prelude.dep_cache) |dep_cache| {
+        var it = dep_cache.iterator();
+        while (it.next()) |entry| {
+            allocator.free(entry.key_ptr.*);
+            entry.value_ptr.deinit(allocator);
+        }
+        dep_cache.deinit();
+        allocator.destroy(dep_cache);
+    };
 
     // Parse the main file (using in-memory content)
     const tokenizer = Tokenizer.create(content);
     var parser = Parser.create(allocator, tokenizer, filename, content) catch return null;
-    const module = parser.parse(allocator) catch return null;
+    const rawModule = parser.parse(allocator) catch return null;
+    defer allocator.free(rawModule.ast);
+
+    var ppCtx = Preprocessor.CompileTimeContext.init(allocator);
+    defer ppCtx.deinit();
+    const module = Preprocessor.preprocessModule(allocator, rawModule, &ppCtx) catch return null;
 
     // Analyze dependencies from disk
     var depCache = std.StringHashMap(Analyzer.AnalyzeResult).init(allocator);
     defer {
         var it = depCache.iterator();
-        while (it.next()) |entry| entry.value_ptr.deinit(allocator);
+        while (it.next()) |entry| {
+            allocator.free(entry.key_ptr.*);
+            entry.value_ptr.deinit(allocator);
+        }
         depCache.deinit();
     }
     var inProgress = std.StringHashMap(void).init(allocator);
@@ -297,9 +362,9 @@ fn runAnalyzer(
     defer depResults.deinit();
 
     for (module.deps) |dep| {
-        const dir = std.fs.path.dirname(filename) orelse ".";
-        const resolved = try std.fs.path.join(allocator, &.{ dir, dep.path });
-        analyzeDep(allocator, resolved, &depCache, &inProgress, &prelude);
+        const resolved = try resolveImportPath(allocator, filename, dep.path);
+        defer allocator.free(resolved);
+        analyzeDep(allocator, resolved, &depCache, &inProgress, &prelude, ctx.stdlib_path, true);
         if (depCache.get(resolved)) |r| {
             try depResults.put(dep.path, r);
         }
@@ -425,4 +490,63 @@ fn typeToString(t: Sig.ZSType) []const u8 {
         .pointer => "pointer",
         .array_type => "array",
     };
+}
+
+fn isStdlibPath(path: []const u8, stdlib_path: ?[]const u8) bool {
+    if (stdlib_path) |sp| {
+        if (std.mem.startsWith(u8, path, sp)) return true;
+        if (std.mem.indexOf(u8, path, "/stdlib/") != null and std.mem.indexOf(u8, sp, "stdlib") != null) return true;
+    }
+    return std.mem.startsWith(u8, path, "stdlib/") or
+        std.mem.indexOf(u8, path, "/stdlib/") != null;
+}
+
+fn resolveImportPath(allocator: std.mem.Allocator, importer_path: []const u8, import_path: []const u8) ![]const u8 {
+    if (std.mem.startsWith(u8, import_path, "./") or std.mem.startsWith(u8, import_path, "../")) {
+        const dir = std.fs.path.dirname(importer_path) orelse ".";
+        const raw = try std.mem.concat(allocator, u8, &.{ dir, "/", import_path });
+        defer allocator.free(raw);
+        return std.fs.path.resolve(allocator, &.{raw});
+    }
+
+    if (std.fs.path.isAbsolute(import_path)) {
+        return allocator.dupe(u8, import_path);
+    }
+
+    return std.fs.path.resolve(allocator, &.{import_path});
+}
+
+test "daemon analyzer resolves imported overloaded functions through stdlib" {
+    const content =
+        \\import { print } from "../../stdlib/fs.chisa"
+        \\print(1)
+        \\print("")
+        \\
+    ;
+
+    var result = (try runAnalyzer(testing.allocator, "tests/fixtures/daemon_import_print.chisa", content, .{
+        .stdlib_path = "stdlib",
+    })).?;
+    defer result.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 0), result.errors.len);
+}
+
+test "daemon analyzer matches CLI behavior for net_google example" {
+    var threaded = std.Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const filename = try std.fs.path.resolve(testing.allocator, &.{"examples/net_google.chisa"});
+    defer testing.allocator.free(filename);
+
+    const content = try std.Io.Dir.cwd().readFileAlloc(io, "examples/net_google.chisa", testing.allocator, .limited(1024 * 1024));
+    defer testing.allocator.free(content);
+
+    var result = (try runAnalyzer(testing.allocator, filename, content, .{
+        .stdlib_path = "stdlib",
+    })).?;
+    defer result.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 0), result.errors.len);
 }

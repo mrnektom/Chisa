@@ -109,6 +109,22 @@ scalar long
 Valid scalar names: `number`, `long`, `short`, `byte`, `boolean`, `char`. Declaring an unknown name is a compile error.
 `stdlib/prelude.chisa` declares all built-in scalar types, making them available in every module.
 
+### Explicit primitive coercion
+
+Primitive scalar values can be converted explicitly with the `as` keyword:
+
+```chisa
+let widened = 1 as long
+let narrowed = widened as byte
+let truthy = widened as boolean
+let code = 'A' as number
+```
+
+- `as` only supports primitive scalar types: `number`, `long`, `short`, `byte`, `char`, and `boolean`.
+- Type aliases that resolve to those scalar types are allowed.
+- The cast applies to the immediately preceding expression. For example, `a + b as long` casts `b`, not the whole sum.
+- Casting to `boolean` compares against zero; casting from `boolean` produces `0` or `1`.
+
 ---
 
 ## Functions
@@ -815,6 +831,93 @@ when {
 
 ---
 
+## Comptime and Runtime Blocks
+
+`comptime { ... }` executes compile-time logic. `runtime { ... }` may only appear inside `comptime` and emits ordinary
+runtime declarations or statements.
+
+```chisa
+struct Point { x: number, y: number }
+
+comptime {
+    runtime {
+        fn Point.zero(): Point = Point { x: 0, y: 0 }
+    }
+}
+
+let p = Point.zero()
+```
+
+### Purpose
+
+- `comptime` introduces a compile-time context. Code inside it is evaluated by the compiler rather than emitted as
+  ordinary runtime code.
+- `runtime` re-enters the normal runtime declaration world from inside a compile-time context. It is used when
+  compile-time logic needs to emit runtime code derived from compile-time analysis.
+
+### Intended semantics
+
+- A `comptime { ... }` block may contain compile-time declarations, compile-time statements, and nested `runtime`
+  blocks.
+- A `runtime { ... }` block nested inside `comptime` emits declarations into the surrounding module after compile-time
+  evaluation completes.
+- `runtime` is only valid inside a `comptime` context; using it elsewhere is a compile error.
+- Names declared only inside `comptime` are not visible at runtime unless they are emitted through a nested `runtime`
+  block.
+- Inside `comptime`, the compiler exposes full type information for analyzed declarations. Compile-time code may inspect
+  type shape, fields, enum variants, generic arguments, and other semantic metadata made available by the compiler.
+- A nested `runtime` block may interpolate compile-time values and type-derived metadata into emitted runtime code. The
+  generated code is then analyzed as ordinary runtime code after interpolation.
+
+### Interpolation
+
+Interpolation splices compile-time values, identifiers, or type-derived fragments into a nested `runtime` block.
+
+- Interpolation is only valid inside `runtime` blocks that are themselves inside `comptime`.
+- Interpolated values must be compile-time known.
+- Interpolation may be used to generate declarations, function bodies, field access, match arms, or other runtime
+  syntax supported by the surrounding position.
+- If interpolation produces invalid runtime syntax or invalid typing, the compiler reports an error against the
+  generated runtime code.
+
+Illustrative shape:
+
+```chisa
+comptime {
+    let fields = typeOf(Point).fields
+
+    runtime {
+        fn Point.dump(): string =
+            ${fields.map { field -> "\"${field.name}=\" + this.${field.name}" }.join(" + \",\" + ")}
+    }
+}
+```
+
+The exact interpolation syntax and reflection API surface are part of this feature and are not yet implemented.
+
+### Intended use
+
+This feature is meant for metaprogramming patterns such as:
+
+- generating repetitive declarations from compile-time data
+- inspecting type information and deriving APIs from it
+- specializing runtime helpers from compile-time configuration
+- computing values at compile time and interpolating them into emitted runtime code
+
+### Status
+
+This syntax is reserved by the parser and documented as the intended language design, but it is **not implemented** in
+the current compiler pipeline.
+
+- The analyzer does not execute `comptime` blocks.
+- Nested `runtime` emission is not lowered to IR or LLVM.
+- Current tests keep this area skipped/reserved rather than enabled.
+
+Until implementation lands, use top-level declarations and `when` for the subset of compile-time selection that is
+currently supported.
+
+---
+
 ## Imports and Exports
 
 ```chisa
@@ -1029,8 +1132,8 @@ return type `Unit`.
 
 - **Inference failures are not always reported cleanly** — when the analyzer cannot resolve a type, diagnostics may
   still surface the internal placeholder `unknown` instead of a more specific user-facing type error.
-- **`comptime { }` / `runtime { }` blocks are not implemented inside function bodies** — parser/tests reserve this
-  syntax, but the current compiler does not analyze, execute, or lower these blocks yet.
+- **`comptime { }` / `runtime { }` blocks are not implemented** — the syntax is reserved and specified, but the
+  current compiler does not analyze, execute, or lower these blocks yet, either at top level or inside function bodies.
 
 ### Design notes
 

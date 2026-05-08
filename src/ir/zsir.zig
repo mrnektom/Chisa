@@ -1,5 +1,5 @@
 const std = @import("std");
-const ZSIRType = enum { assign, store, call, fn_decl, fn_def, ret, branch, compare, arith, loop, module_init, struct_init, field_access, ptr_op, deref_op, store_ptr, alloc_op, free_op, array_init, index_access, index_store, field_store, enum_init, match_expr, enum_decl, break_stmt, continue_stmt, not_op, asm_block };
+const ZSIRType = enum { assign, store, call, fn_decl, fn_def, ret, branch, compare, arith, cast, loop, module_init, struct_init, field_access, ptr_op, deref_op, store_ptr, alloc_op, free_op, array_init, index_access, index_store, field_store, enum_init, match_expr, enum_decl, break_stmt, continue_stmt, not_op, asm_block };
 
 pub const ZSIRInstructions = struct {
     instructions: []ZSIR,
@@ -19,6 +19,7 @@ pub const ZSIR = union(ZSIRType) {
     branch: ZSIRBranch,
     compare: ZSIRCompare,
     arith: ZSIRArith,
+    cast: ZSIRCast,
     loop: ZSIRLoop,
     module_init: ZSIRModuleInit,
     struct_init: ZSIRStructInit,
@@ -51,6 +52,7 @@ pub const ZSIR = union(ZSIRType) {
             .branch => self.branch.deinit(allocator),
             .compare => self.compare.deinit(allocator),
             .arith => self.arith.deinit(allocator),
+            .cast => self.cast.deinit(allocator),
             .loop => self.loop.deinit(allocator),
             .module_init => self.module_init.deinit(allocator),
             .struct_init => self.struct_init.deinit(allocator),
@@ -80,7 +82,7 @@ pub const ZSIR = union(ZSIRType) {
         switch (self) {
             .assign => try writer.print("{f}", .{self.assign}),
             .call => try writer.print("{f}", .{self.call}),
-            .store, .fn_decl, .fn_def, .ret, .branch, .compare, .arith, .loop, .module_init, .struct_init, .field_access, .ptr_op, .deref_op, .store_ptr, .alloc_op, .free_op, .array_init, .index_access, .index_store, .field_store, .enum_init, .match_expr, .enum_decl, .break_stmt, .continue_stmt, .not_op, .asm_block => {},
+            .store, .fn_decl, .fn_def, .ret, .branch, .compare, .arith, .cast, .loop, .module_init, .struct_init, .field_access, .ptr_op, .deref_op, .store_ptr, .alloc_op, .free_op, .array_init, .index_access, .index_store, .field_store, .enum_init, .match_expr, .enum_decl, .break_stmt, .continue_stmt, .not_op, .asm_block => {},
         }
     }
 };
@@ -190,6 +192,8 @@ pub const ZSIRFnDef = struct {
 pub const ZSIRRet = struct {
     value: ?[]const u8,
     startPos: usize = 0,
+    wrapEnumName: ?[]const u8 = null,
+    wrapVariantTag: ?u32 = null,
 
     pub fn deinit(_: *const @This(), _: std.mem.Allocator) void {}
 };
@@ -228,6 +232,18 @@ pub const ZSIRArith = struct {
     lhs: []const u8,
     rhs: []const u8,
     op: []const u8,
+
+    pub fn deinit(self: *const @This(), allocator: std.mem.Allocator) void {
+        allocator.free(self.resultName);
+    }
+};
+
+pub const ZSIRCast = struct {
+    resultName: []const u8,
+    operand: []const u8,
+    sourceType: []const u8,
+    targetType: []const u8,
+    startPos: usize = 0,
 
     pub fn deinit(self: *const @This(), allocator: std.mem.Allocator) void {
         allocator.free(self.resultName);

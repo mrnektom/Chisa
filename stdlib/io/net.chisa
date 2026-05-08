@@ -1,0 +1,494 @@
+import { Either } from "../Either.chisa"
+import { close, readFd, writeFd, readFile } from "../fs.chisa"
+import { String, strConcat } from "../String.chisa"
+
+const AF_INET = 2
+const SOCK_STREAM = 1
+const SOCK_DGRAM = 2
+const HTTP_READ_CAP = 262144
+const DNS_PACKET_CAP = 512
+const DNS_PORT = 53
+
+export struct Ipv4Address {
+  a: number,
+  b: number,
+  c: number,
+  d: number,
+}
+
+export enum NetError {
+  SocketOpenFailed(number),
+  ConnectFailed(number),
+  WriteFailed(number),
+  ReadFailed(number),
+  DnsConfigReadFailed,
+  DnsServerNotFound,
+  DnsServerParseFailed,
+  DnsInvalidHost,
+  DnsSendFailed(number),
+  DnsReadFailed(number),
+  DnsMalformedResponse,
+  DnsNoAnswer,
+}
+
+fn numberToStringLocal(n: number): String {
+  let buf = ['\0'; 20]
+  let pos = 19
+  let is_neg = 0
+  let val = n
+
+  if (n < 0) {
+    is_neg = 1
+    val = 0 - n
+  }
+
+  if (val == 0) {
+    buf[pos] = 48
+    pos = pos - 1
+  }
+
+  while (val > 0) {
+    let digit = val % 10
+    buf[pos] = digit + 48
+    pos = pos - 1
+    val = val / 10
+  }
+
+  if (is_neg == 1) {
+    buf[pos] = 45
+    pos = pos - 1
+  }
+
+  let start = pos + 1
+  let len = 20 - start
+  let result: Pointer<char> = allocBuf(len)
+  for (let i = 0; i < len; i = i + 1) {
+    result[i] = buf[start + i]
+  }
+  return String { len: len, data: result }
+}
+
+export fn NetError.toString(): String = match this {
+  NetError.SocketOpenFailed(errno) -> strConcat("SocketOpenFailed(errno=", strConcat(numberToStringLocal(errno), ")")),
+  NetError.ConnectFailed(errno) -> strConcat("ConnectFailed(errno=", strConcat(numberToStringLocal(errno), ")")),
+  NetError.WriteFailed(errno) -> strConcat("WriteFailed(errno=", strConcat(numberToStringLocal(errno), ")")),
+  NetError.ReadFailed(errno) -> strConcat("ReadFailed(errno=", strConcat(numberToStringLocal(errno), ")")),
+  NetError.DnsConfigReadFailed -> "DnsConfigReadFailed",
+  NetError.DnsServerNotFound -> "DnsServerNotFound",
+  NetError.DnsServerParseFailed -> "DnsServerParseFailed",
+  NetError.DnsInvalidHost -> "DnsInvalidHost",
+  NetError.DnsSendFailed(errno) -> strConcat("DnsSendFailed(errno=", strConcat(numberToStringLocal(errno), ")")),
+  NetError.DnsReadFailed(errno) -> strConcat("DnsReadFailed(errno=", strConcat(numberToStringLocal(errno), ")")),
+  NetError.DnsMalformedResponse -> "DnsMalformedResponse",
+  NetError.DnsNoAnswer -> "DnsNoAnswer",
+}
+
+fn socket(domain: number, sockType: number, protocol: number): number {
+  asm {
+    in rax = 41
+    in rdi = domain
+    in rsi = sockType
+    in rdx = protocol
+    out rax = fd
+    "syscall"
+  }
+  return fd
+}
+
+fn allocBuf(size: long): Pointer<char> {
+  asm {
+    in rax = 9
+    in rdi = 0
+    in rsi = size
+    in rdx = 3
+    in r10 = 34
+    in r8 = -1
+    in r9 = 0
+    out rax = addr
+    "syscall"
+  }
+  return addr
+}
+
+fn freeBuf(addr: Pointer<char>, size: long): void {
+  asm {
+    in rax = 11
+    in rdi = addr
+    in rsi = size
+    "syscall"
+  }
+}
+
+fn connect(fd: number, addr: Pointer<char>, addrLen: number): number {
+  asm {
+    in rax = 42
+    in rdi = fd
+    in rsi = addr
+    in rdx = addrLen
+    out rax = result
+    "syscall"
+  }
+  return result
+}
+
+fn sendTo(fd: number, buf: Pointer<char>, count: number, flags: number, addr: Pointer<char>, addrLen: number): number {
+  asm {
+    in rax = 44
+    in rdi = fd
+    in rsi = buf
+    in rdx = count
+    in r10 = flags
+    in r8 = addr
+    in r9 = addrLen
+    out rax = result
+    "syscall"
+  }
+  return result
+}
+
+fn recvFrom(fd: number, buf: Pointer<char>, count: number, flags: number): number {
+  asm {
+    in rax = 45
+    in rdi = fd
+    in rsi = buf
+    in rdx = count
+    in r10 = flags
+    in r8 = 0
+    in r9 = 0
+    out rax = result
+    "syscall"
+  }
+  return result
+}
+
+fn buildSockAddrIpv4Raw(a: number, b: number, c: number, d: number, port: number): Pointer<char> {
+  let addrLen: long = 16
+  let addr: Pointer<char> = allocBuf(addrLen)
+  for (let i = 0; i < addrLen; i = i + 1) {
+    addr[i] = 0
+  }
+
+  addr[0] = AF_INET
+  addr[1] = 0
+  addr[2] = port / 256
+  addr[3] = port % 256
+  addr[4] = a
+  addr[5] = b
+  addr[6] = c
+  addr[7] = d
+
+  return addr
+}
+
+fn buildSockAddrIpv4(addr: Ipv4Address, port: number): Pointer<char> {
+  return buildSockAddrIpv4Raw(addr.a, addr.b, addr.c, addr.d, port)
+}
+
+export fn tcpConnectIpv4(a: number, b: number, c: number, d: number, port: number): Either<NetError, number> {
+  let fd = socket(AF_INET, SOCK_STREAM, 0)
+  if (fd < 0) {
+    return Either.Left(NetError.SocketOpenFailed(0 - fd))
+  }
+
+  let addr = buildSockAddrIpv4Raw(a, b, c, d, port)
+  let rc = connect(fd, addr, 16)
+  freeBuf(addr, 16)
+  if (rc < 0) {
+    close(fd)
+    return Either.Left(NetError.ConnectFailed(0 - rc))
+  }
+
+  return Either.Right(fd)
+}
+
+export fn closeSocket(fd: number): void {
+  close(fd)
+}
+
+fn isSpace(ch: char): boolean {
+  if (ch == ' ') return true
+  if (ch == '\t') return true
+  if (ch == '\n') return true
+  if (ch == '\r') return true
+  return false
+}
+
+fn isDigit(ch: char): boolean {
+  if (ch < '0') return false
+  if (ch > '9') return false
+  return true
+}
+
+fn startsWithAt(text: String, start: number, needle: String): boolean {
+  if (start + needle.len > text.len) return false
+  for (let i = 0; i < needle.len; i = i + 1) {
+    if (text.data[start + i] != needle.data[i]) return false
+  }
+  return true
+}
+
+fn parseIpv4Token(text: String, start: number): Either<NetError, Ipv4Address> {
+  let cursor: number = start
+  let octet: number = 0
+  let part: number = 0
+  let hasDigit: boolean = false
+  let a: number = 0
+  let b: number = 0
+  let c: number = 0
+
+  while (cursor < text.len) {
+    let ch = text.data[cursor]
+    if (isDigit(ch)) {
+      octet = octet * 10 + ch - '0'
+      if (octet > 255) return Either.Left(NetError.DnsServerParseFailed)
+      hasDigit = true
+      cursor = cursor + 1
+    } else if (ch == '.') {
+      if (hasDigit == false) return Either.Left(NetError.DnsServerParseFailed)
+      if (part >= 3) return Either.Left(NetError.DnsServerParseFailed)
+      if (part == 0) {
+        a = octet
+      }
+      if (part == 1) {
+        b = octet
+      }
+      if (part == 2) {
+        c = octet
+      }
+      part = part + 1
+      octet = 0
+      hasDigit = false
+      cursor = cursor + 1
+    } else {
+      if (isSpace(ch)) {
+        break
+      }
+      if (ch == '#') {
+        break
+      }
+      return Either.Left(NetError.DnsServerParseFailed)
+    }
+  }
+
+  if (hasDigit == false) return Either.Left(NetError.DnsServerParseFailed)
+  if (part != 3) return Either.Left(NetError.DnsServerParseFailed)
+  return Either.Right(Ipv4Address { a: a, b: b, c: c, d: octet })
+}
+
+fn loadDnsServer(): Either<NetError, Ipv4Address> {
+  return Either.Right(Ipv4Address { a: 8, b: 8, c: 8, d: 8 })
+}
+
+fn encodeDnsQuestion(packet: Pointer<char>, host: String): number {
+  packet[0] = 18
+  packet[1] = 52
+  packet[2] = 1
+  packet[3] = 0
+  packet[4] = 0
+  packet[5] = 1
+  packet[6] = 0
+  packet[7] = 0
+  packet[8] = 0
+  packet[9] = 0
+  packet[10] = 0
+  packet[11] = 0
+
+  let pos: number = 12
+  let labelStart: number = 0
+  let labelLen: number = 0
+
+  for (let i = 0; i < host.len; i = i + 1) {
+    if (host.data[i] == '.') {
+      if (labelLen == 0) return 0
+      if (labelLen > 63) return 0
+      packet[pos] = labelLen
+      pos = pos + 1
+      for (let j = 0; j < labelLen; j = j + 1) {
+        packet[pos + j] = host.data[labelStart + j]
+      }
+      pos = pos + labelLen
+      labelStart = i + 1
+      labelLen = 0
+    } else {
+      labelLen = labelLen + 1
+    }
+  }
+
+  if (labelLen == 0) return 0
+  if (labelLen > 63) return 0
+  packet[pos] = labelLen
+  pos = pos + 1
+  for (let j = 0; j < labelLen; j = j + 1) {
+    packet[pos + j] = host.data[labelStart + j]
+  }
+  pos = pos + labelLen
+  packet[pos] = 0
+  packet[pos + 1] = 0
+  packet[pos + 2] = 1
+  packet[pos + 3] = 0
+  packet[pos + 4] = 1
+  return pos + 5
+}
+
+fn readDnsU16(packet: Pointer<char>, pos: number): number {
+  return packet[pos] * 256 + packet[pos + 1]
+}
+
+fn skipDnsName(packet: Pointer<char>, size: number, pos: number): number {
+  let cursor: number = pos
+  while (cursor < size) {
+    let labelLen = packet[cursor] - '\0'
+    if (labelLen == 0) return cursor + 1
+    if (labelLen >= 192) {
+      if (cursor + 1 >= size) return 0 - 1
+      return cursor + 2
+    }
+    cursor = cursor + labelLen + 1
+  }
+  return 0 - 1
+}
+
+fn parseDnsResponse(packet: Pointer<char>, size: number): Either<NetError, Ipv4Address> {
+  if (size < 12) return Either.Left(NetError.DnsMalformedResponse)
+
+  let questionCount = readDnsU16(packet, 4)
+  let answerCount = readDnsU16(packet, 6)
+  let cursor: number = 12
+
+  for (let i = 0; i < questionCount; i = i + 1) {
+    cursor = skipDnsName(packet, size, cursor)
+    if (cursor < 0) return Either.Left(NetError.DnsMalformedResponse)
+    if (cursor + 4 > size) return Either.Left(NetError.DnsMalformedResponse)
+    cursor = cursor + 4
+  }
+
+  for (let i = 0; i < answerCount; i = i + 1) {
+    cursor = skipDnsName(packet, size, cursor)
+    if (cursor < 0) return Either.Left(NetError.DnsMalformedResponse)
+    if (cursor + 10 > size) return Either.Left(NetError.DnsMalformedResponse)
+
+    let recordType = readDnsU16(packet, cursor)
+    let recordClass = readDnsU16(packet, cursor + 2)
+    let dataLen = readDnsU16(packet, cursor + 8)
+    cursor = cursor + 10
+
+    if (cursor + dataLen > size) return Either.Left(NetError.DnsMalformedResponse)
+
+    if (recordType == 1) {
+      if (recordClass == 1) {
+        if (dataLen == 4) {
+          return Either.Right(Ipv4Address {
+            a: packet[cursor],
+            b: packet[cursor + 1],
+            c: packet[cursor + 2],
+            d: packet[cursor + 3],
+          })
+        }
+      }
+    }
+
+    cursor = cursor + dataLen
+  }
+
+  return Either.Left(NetError.DnsNoAnswer)
+}
+
+export fn tcpConnect(host: String, port: number): Either<NetError, number> {
+  let addr = resolveIpv4(host)!!
+  return tcpConnectIpv4(addr.a, addr.b, addr.c, addr.d, port)
+}
+
+export fn sendAll(fd: number, data: String): Either<NetError, number> {
+  let written: number = 0
+  while (written < data.len) {
+    let chunk = String {
+      len: data.len - written,
+      data: data.data + written,
+    }
+    let bytes = writeFd(fd, chunk)
+    if (bytes <= 0) {
+      return Either.Left(NetError.WriteFailed(0 - bytes))
+    }
+    written = written + bytes
+  }
+  return Either.Right(written)
+}
+
+export fn readAll(fd: number, cap: number): Either<NetError, String> {
+  let bufCap: long = cap
+  let buf: Pointer<char> = allocBuf(bufCap)
+  let total: number = 0
+
+  while (total < cap) {
+    let bytes = readFd(fd, buf + total, cap - total)
+    if (bytes < 0) {
+      return Either.Left(NetError.ReadFailed(0 - bytes))
+    }
+    if (bytes == 0) {
+      break
+    }
+    total = total + bytes
+  }
+
+  return Either.Right(String { len: total, data: buf })
+}
+
+fn buildHttpGetRequest(host: String, path: String): String {
+  let a = strConcat("GET ", path)
+  let b = strConcat(a, " HTTP/1.0\r\nHost: ")
+  let c = strConcat(b, host)
+  return strConcat(c, "\r\nConnection: close\r\n\r\n")
+}
+
+export fn httpGetIpv4(host: String, a: number, b: number, c: number, d: number, path: String): Either<NetError, String> {
+  let fd = tcpConnectIpv4(a, b, c, d, 80)!!
+  let request = buildHttpGetRequest(host, path)
+  sendAll(fd, request)!!
+  let response = readAll(fd, HTTP_READ_CAP)
+  close(fd)
+  return response
+}
+
+export fn httpGet(host: String, path: String): Either<NetError, String> {
+  let addr = resolveIpv4(host)!!
+  return httpGetIpv4(host, addr.a, addr.b, addr.c, addr.d, path)
+}
+
+export fn resolveIpv4(host: String): Either<NetError, Ipv4Address> {
+  let server = loadDnsServer()!!
+  let fd = socket(AF_INET, SOCK_DGRAM, 0)
+  if (fd < 0) {
+    return Either.Left(NetError.SocketOpenFailed(0 - fd))
+  }
+
+  let serverAddr = buildSockAddrIpv4(server, DNS_PORT)
+  let packetCap: long = DNS_PACKET_CAP
+  let query = allocBuf(packetCap)
+  let queryLen = encodeDnsQuestion(query, host)
+  if (queryLen == 0) {
+    freeBuf(serverAddr, 16)
+    freeBuf(query, packetCap)
+    close(fd)
+    return Either.Left(NetError.DnsInvalidHost)
+  }
+
+  let sent = sendTo(fd, query, queryLen, 0, serverAddr, 16)
+  freeBuf(serverAddr, 16)
+  freeBuf(query, packetCap)
+  if (sent < 0) {
+    close(fd)
+    return Either.Left(NetError.DnsSendFailed(0 - sent))
+  }
+
+  let response = allocBuf(packetCap)
+  let received = recvFrom(fd, response, DNS_PACKET_CAP, 0)
+  close(fd)
+  if (received < 0) {
+    freeBuf(response, packetCap)
+    return Either.Left(NetError.DnsReadFailed(0 - received))
+  }
+
+  let addr = parseDnsResponse(response, received)
+  freeBuf(response, packetCap)
+  return addr
+}

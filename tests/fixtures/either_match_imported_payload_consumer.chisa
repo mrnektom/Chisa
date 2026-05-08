@@ -1,0 +1,8 @@
+import { fetch } from "./either_match_imported_payload_lib.chisa"
+
+let result = fetch()
+
+match result {
+    Either.Right(body) -> print(body),
+    Either.Left(err) -> print(err.toString())
+}

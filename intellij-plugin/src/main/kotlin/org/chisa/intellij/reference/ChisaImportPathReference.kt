@@ -32,7 +32,7 @@ class ChisaImportPathReference(element: ChisaImportPath) :
         val containingFile = element.containingFile?.virtualFile ?: return emptyArray()
         val dir = containingFile.parent ?: return emptyArray()
         return dir.children
-            .filter { it.extension == "zs" && it != containingFile }
+            .filter { it.extension == "chisa" && it != containingFile }
             .map { "./${it.name}" }
             .toTypedArray()
     }

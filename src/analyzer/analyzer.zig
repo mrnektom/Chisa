@@ -57,12 +57,15 @@ extensionCalls: std.AutoHashMap(usize, void),
 lambdaNames: std.AutoHashMap(usize, []const u8),
 lambdaTypes: std.AutoHashMap(usize, sig.ZSType),
 safeNavInfo: std.AutoHashMap(usize, SafeNavInfo),
+returnWrapInfo: std.AutoHashMap(usize, ReturnWrapInfo),
+primitiveCastInfo: std.AutoHashMap(usize, PrimitiveCastInfo),
 lambdaCount: usize,
 typeResolutionDepth: u32,
 inLoop: bool,
 typeAliases: std.StringHashMap(TypeAliasDef),
 expectedType: ?Symbol.ZSTypeNotation = null,
 currentFnReturnType: ?Symbol.ZSTypeNotation = null,
+statementExprContext: bool = false,
 
 pub const EnumInitInfo = struct {
     enumName: []const u8,
@@ -74,6 +77,17 @@ pub const SafeNavInfo = struct {
     receiverEnumName: []const u8,
     resultEnumName: []const u8,
     fieldIndex: u32,
+    callName: ?[]const u8 = null,
+};
+
+pub const ReturnWrapInfo = struct {
+    enumName: []const u8,
+    variantTag: u32,
+};
+
+pub const PrimitiveCastInfo = struct {
+    sourceType: []const u8,
+    targetType: []const u8,
 };
 
 const UseAlias = struct {
@@ -165,6 +179,8 @@ pub const AnalyzeResult = struct {
     lambdaNames: std.AutoHashMap(usize, []const u8),
     lambdaTypes: std.AutoHashMap(usize, sig.ZSType),
     safeNavInfo: std.AutoHashMap(usize, SafeNavInfo),
+    returnWrapInfo: std.AutoHashMap(usize, ReturnWrapInfo),
+    primitiveCastInfo: std.AutoHashMap(usize, PrimitiveCastInfo),
     typeAliases: std.StringHashMap(TypeAliasDef),
 
     pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
@@ -269,6 +285,8 @@ pub const AnalyzeResult = struct {
         self.lambdaNames.deinit();
         self.lambdaTypes.deinit();
         self.safeNavInfo.deinit();
+        self.returnWrapInfo.deinit();
+        self.primitiveCastInfo.deinit();
         self.typeAliases.deinit();
     }
 };
@@ -326,6 +344,8 @@ pub fn analyzeWithPrelude(module: zsm.ZSModule, allocator: std.mem.Allocator, de
         .lambdaNames = std.AutoHashMap(usize, []const u8).init(allocator),
         .lambdaTypes = std.AutoHashMap(usize, sig.ZSType).init(allocator),
         .safeNavInfo = std.AutoHashMap(usize, SafeNavInfo).init(allocator),
+        .returnWrapInfo = std.AutoHashMap(usize, ReturnWrapInfo).init(allocator),
+        .primitiveCastInfo = std.AutoHashMap(usize, PrimitiveCastInfo).init(allocator),
         .lambdaCount = 0,
         .typeResolutionDepth = 0,
         .inLoop = false,
@@ -414,6 +434,8 @@ pub fn analyzeWithPrelude(module: zsm.ZSModule, allocator: std.mem.Allocator, de
         .lambdaNames = analyzer.lambdaNames,
         .lambdaTypes = analyzer.lambdaTypes,
         .safeNavInfo = analyzer.safeNavInfo,
+        .returnWrapInfo = analyzer.returnWrapInfo,
+        .primitiveCastInfo = analyzer.primitiveCastInfo,
         .typeAliases = analyzer.typeAliases,
     };
 }
@@ -464,6 +486,10 @@ pub fn analyzeExpr(self: *Self, expr: ast.expr.ZSExpr) !Symbol.ZSTypeNotation {
 
 pub fn analyzeLambda(self: *Self, lambda: ast.expr.ZSLambda) Error!Symbol.ZSTypeNotation {
     return expr_analyzer.analyzeLambda(self, lambda);
+}
+
+pub fn analyzeCast(self: *Self, cast: ast.expr.ZSCast) Error!Symbol.ZSTypeNotation {
+    return expr_analyzer.analyzeCast(self, cast);
 }
 
 pub fn analyzeVariable(self: *Self, variable: ast.stmt.ZSVar) !Symbol {
@@ -683,7 +709,7 @@ pub fn recordErrorAt(
 
 fn shouldReportUnknownExpr(expr: ast.expr.ZSExpr) bool {
     return switch (expr) {
-        .while_expr, .for_expr, .break_expr, .continue_expr, .return_expr, .block => false,
+        .while_expr, .for_expr, .break_expr, .continue_expr, .return_expr, .block, .cast => false,
         else => true,
     };
 }

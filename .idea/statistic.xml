@@ -2,12 +2,17 @@
 <project version="4">
   <component name="Statistic">
     <option name="fileTypes" value="class;svn-base;svn-work;Extra;gif;png;jpg;jpeg;bmp;tga;tiff;ear;war;zip;jar;iml;iws;ipr;bz2;gz;pyc;d;h;so" />
+    <option name="separateTabsFileTypes" value="java;xml;css;html;js;properties;jsp;txt;php;php4;php5;phtml;inc;py;vue;kt;zig;chisa" />
     <option name="excludeDotArtifactDirectory" value="true" />
     <option name="excludedDirectories">
       <list>
         <option value="$PROJECT_DIR$/zig-out" />
         <option value="$PROJECT_DIR$/node_modules" />
         <option value="$PROJECT_DIR$/dist" />
+        <option value="$PROJECT_DIR$/zig-out" />
+        <option value="$PROJECT_DIR$/intellij-plugin/.omc" />
+        <option value="$PROJECT_DIR$/.zig-cache" />
+        <option value="$PROJECT_DIR$" />
       </list>
     </option>
   </component>

@@ -1,0 +1,13 @@
+when {
+    os == "linux" -> {
+        fn platformValue(): number = 11
+        fn platformDouble(x: number): number = x * 2
+    }
+    else -> {
+        fn platformValue(): number = 0
+        fn platformDouble(x: number): number = x
+    }
+}
+
+let result = platformDouble(platformValue())
+print(result)

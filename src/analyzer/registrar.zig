@@ -44,6 +44,9 @@ pub fn importDependencies(
             for (entry.value_ptr.items) |ov| {
                 try gop.value_ptr.append(allocator, ov);
             }
+            if (gop.value_ptr.items.len > 1) {
+                try self.overloadedNames.put(entry.key_ptr.*, {});
+            }
         }
     }
 
@@ -138,6 +141,15 @@ pub fn importDependencies(
             }
         }
     }
+
+    // Scalar type availability should not depend on prelude compilation order.
+    // Stdlib dependencies can be analyzed before the prelude is cached, especially
+    // during recursive prelude imports.
+    inline for (type_resolver.builtinScalars) |entry| {
+        if (!self.scalarDefs.contains(entry[0])) {
+            try self.scalarDefs.put(entry[0], entry[1]);
+        }
+    }
 }
 
 pub fn registerIntrinsic(self: anytype, allocator: std.mem.Allocator, name: []const u8, argTypeNames: []const []const u8, retType: Symbol.ZSTypeNotation) Error!void {
@@ -228,12 +240,12 @@ pub fn registerFunction(self: anytype, func: ast.stmt.ZSFn) Error!void {
         try self.allocatedSliceLists.append(self.allocator, argTypes);
         argTypes[0] = receiver; // receiver type as first arg
         for (func.args, 0..) |arg, i| {
-            argTypes[i + 1] = if (arg.type) |t| t.typeName() else "unknown";
+            argTypes[i + 1] = if (arg.type) |t| try overloadArgTypeKey(self, t) else "unknown";
         }
 
         const external = func.modifiers.external != null;
         const mangledName = if (external)
-            func.name
+            key
         else blk: {
             const mname = try computeMangledName(self.allocator, key, argTypes[1..]);
             try self.allocatedStrings.append(self.allocator, mname);
@@ -258,7 +270,7 @@ pub fn registerFunction(self: anytype, func: ast.stmt.ZSFn) Error!void {
     const argTypes = try self.allocator.alloc([]const u8, func.args.len);
     try self.allocatedSliceLists.append(self.allocator, argTypes);
     for (func.args, 0..) |arg, i| {
-        argTypes[i] = if (arg.type) |t| t.typeName() else "unknown";
+        argTypes[i] = if (arg.type) |t| try overloadArgTypeKey(self, t) else "unknown";
     }
 
     const external = func.modifiers.external != null;
@@ -306,6 +318,24 @@ pub fn registerFunction(self: anytype, func: ast.stmt.ZSFn) Error!void {
         });
         try self.overloads.put(func.name, entries);
     }
+}
+
+fn overloadArgTypeKey(self: anytype, t: ast.ZSTypeNotation) Error![]const u8 {
+    return switch (t) {
+        .array => "array",
+        .fn_type => "function",
+        .generic => |g| {
+            if (std.mem.eql(u8, g.name, "Pointer") and g.type_args.len == 1) {
+                return "pointer";
+            }
+            const resolved = try self.resolveTypeAnnotationFull(t);
+            return type_resolver.typeToString(resolved);
+        },
+        .reference => {
+            const resolved = try self.resolveTypeAnnotationFull(t);
+            return type_resolver.typeToString(resolved);
+        },
+    };
 }
 
 pub fn registerScalars(self: anytype, module: zsm.ZSModule) Error!void {

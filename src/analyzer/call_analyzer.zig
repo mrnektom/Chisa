@@ -59,10 +59,24 @@ pub fn analyzeCall(self: anytype, call: ast.expr.ZSCall) Error!Symbol.ZSTypeNota
             }
             const ptrType = try self.analyzeExpr(call.arguments[0]);
             _ = try self.analyzeExpr(call.arguments[1]);
-            if (ptrType != .pointer) {
+            if (ptrType != .pointer and ptrType != .unknown) {
                 try self.recordError(call, "free() first argument must be a pointer");
+            } else {
+                const pointeeType = if (ptrType == .pointer) ptrType.pointer.* else Symbol.ZSTypeNotation.unknown;
+                const bindingName = if (pointeeType == .unknown)
+                    "char"
+                else
+                    try type_resolver.typeToBindingString(self, pointeeType);
+                if (pointeeType != .unknown) {
+                    try self.allocatedStrings.append(self.allocator, bindingName);
+                }
+
+                const explicitName = try std.fmt.allocPrint(self.allocator, "free${s}", .{bindingName});
+                try self.allocatedStrings.append(self.allocator, explicitName);
+                if (try tryMonomorphizeCall(self, explicitName, &.{}, call.startPos, call.endPos)) |retType| {
+                    return retType;
+                }
             }
-            return Symbol.ZSTypeNotation.unknown;
         }
     }
 
@@ -94,10 +108,6 @@ pub fn analyzeCall(self: anytype, call: ast.expr.ZSCall) Error!Symbol.ZSTypeNota
             var matched: ?OverloadEntry = null;
             for (entries.items) |entry| {
                 if (entry.argTypes.len == extArgTypes.len) {
-                    if (entry.external) {
-                        matched = entry;
-                        break;
-                    }
                     var allMatch = true;
                     for (entry.argTypes, extArgTypes) |a, b| {
                         if (!std.mem.eql(u8, a, b)) {
@@ -133,15 +143,15 @@ pub fn analyzeCall(self: anytype, call: ast.expr.ZSCall) Error!Symbol.ZSTypeNota
     }
 
     if (fnName) |name| {
+        if (try tryInferMonomorphizeCall(self, name, call)) |retType| {
+            return retType;
+        }
         if (!self.overloadedNames.contains(name)) {
             if (self.tableStack.get(name)) |sym| {
                 if (sym.signature == .function) {
                     return try analyzeCallAgainstFunctionType(self, call, sym.signature.function);
                 }
             }
-        }
-        if (try tryInferMonomorphizeCall(self, name, call)) |retType| {
-            return retType;
         }
     }
 
@@ -744,6 +754,14 @@ fn inferTypeParamFromArg(
             }
         },
         .generic => |g| {
+            if (std.mem.eql(u8, g.name, "Pointer") and g.type_args.len == 1) {
+                switch (actualType) {
+                    .pointer => |inner| {
+                        return inferTypeParamFromArg(g.type_args[0], inner.*, paramName, allTypeParams, allBindings);
+                    },
+                    else => {},
+                }
+            }
             switch (actualType) {
                 .enum_type => |et| {
                     if (std.mem.eql(u8, et.name, g.name)) {

@@ -1,0 +1,15 @@
+import { Either } from "../../stdlib/Either.chisa"
+import { String, toCstr } from "../../stdlib/String.chisa"
+import { Unit } from "../../stdlib/Unit.chisa"
+
+fn producePtr(): Either<number, Pointer<char>> {
+    return Either.Right(toCstr("hello"))
+}
+
+fn consumePtr(): Either<number, Unit> {
+    let ptr = producePtr()!!
+    print(String { len: 5, data: ptr })
+    return Either.Right(Unit {})
+}
+
+consumePtr()

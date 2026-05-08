@@ -1,0 +1,17 @@
+import { Either } from "../../stdlib/Either.chisa"
+import { String } from "../../stdlib/String.chisa"
+
+enum NetLikeError {
+    Failed,
+}
+
+fn NetLikeError.toString(): String = match this {
+    NetLikeError.Failed -> "failed"
+}
+
+fn show(result: Either<NetLikeError, String>): Unit = match result {
+    Either.Right(body) -> print(body),
+    Either.Left(err) -> print(err.toString())
+}
+
+show(Either.Left(NetLikeError.Failed))

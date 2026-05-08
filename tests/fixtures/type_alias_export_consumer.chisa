@@ -1,0 +1,6 @@
+import { Unary } from "./type_alias_export_lib.chisa"
+
+let inc: Unary = { n -> n + 1 }
+let result = inc(9)
+
+print(result)

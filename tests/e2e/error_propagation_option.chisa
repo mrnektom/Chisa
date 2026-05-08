@@ -1,0 +1,14 @@
+import { Option } from "../../stdlib/Option.chisa"
+
+fn show(flag: boolean): Unit {
+    let maybe: Option<number> = if (flag) {
+        Option.Some(42)
+    } else {
+        Option.None
+    }
+
+    let value: number = maybe!!
+    print(value)
+}
+
+show(true)

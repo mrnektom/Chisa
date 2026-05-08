@@ -1,0 +1,3 @@
+import { add as sum, base as seed } from "./lib/imports_alias_runtime_lib.chisa"
+
+print(sum(seed, 2))
