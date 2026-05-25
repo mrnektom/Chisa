@@ -405,14 +405,49 @@ pub fn findVariantTag(ed: EnumDef, variantName: []const u8) usize {
     return 0;
 }
 
+fn matchStructFieldKey(matchStartPos: usize, armIndex: usize, patternIndex: usize, fieldIndex: usize) usize {
+    return std.hash.Wyhash.hash(0, std.mem.asBytes(&[_]usize{ matchStartPos, armIndex, patternIndex, fieldIndex }));
+}
+
+fn structPatternBaseName(name: []const u8) []const u8 {
+    if (std.mem.indexOf(u8, name, "__")) |idx| {
+        return name[0..idx];
+    }
+    return name;
+}
+
+fn structPatternNameMatches(subjectName: []const u8, patternName: []const u8) bool {
+    return std.mem.eql(u8, subjectName, patternName) or std.mem.eql(u8, structPatternBaseName(subjectName), patternName);
+}
+
+fn literalPatternCompatible(self: anytype, pattern: ast.expr.ZSMatchArmPattern, targetType: Symbol.ZSTypeNotation) Error!bool {
+    if (targetType == .unknown) return true;
+
+    return switch (pattern) {
+        .number_literal => type_resolver.typesCompatible(targetType, .number),
+        .boolean_literal => targetType == .boolean,
+        .char_literal => targetType == .char,
+        .string_literal => blk: {
+            const stringType = try type_resolver.getStringStructType(self);
+            break :blk type_resolver.typesCompatible(targetType, stringType) or type_resolver.typesCompatible(stringType, targetType);
+        },
+        else => true,
+    };
+}
+
 pub fn analyzeMatchExpr(self: anytype, me: ast.expr.ZSMatchExpr) Error!Symbol.ZSTypeNotation {
     const subjectType = try self.analyzeExpr(me.subject.*);
 
     // For enum patterns, subject must be an enum type
     var hasEnumArm = false;
     for (me.arms) |arm| {
-        if (arm.pattern == .enum_variant) {
-            hasEnumArm = true;
+        for (arm.patterns) |pattern| {
+            if (pattern == .enum_variant) {
+                hasEnumArm = true;
+                break;
+            }
+        }
+        if (hasEnumArm) {
             break;
         }
     }
@@ -453,62 +488,102 @@ pub fn analyzeMatchExpr(self: anytype, me: ast.expr.ZSMatchExpr) Error!Symbol.ZS
     var coveredVariants = std.StringHashMap(void).init(self.allocator);
     defer coveredVariants.deinit();
 
-    for (me.arms) |arm| {
+    for (me.arms, 0..) |arm, armIndex| {
         var armScope = SymbolTable.init(self.allocator);
         defer armScope.deinit();
         try self.tableStack.enterScope(&armScope);
 
-        switch (arm.pattern) {
-            .enum_variant => |ev| {
-                // Verify the variant belongs to the enum
-                var foundVariant: ?sig.ZSEnumVariant = null;
-                for (enumType.variants) |v| {
-                    if (std.mem.eql(u8, v.name, ev.variant_name)) {
-                        foundVariant = v;
-                        break;
-                    }
-                }
-                if (foundVariant == null) {
-                    try self.recordError(me, "Unknown variant in match arm");
-                    _ = try self.tableStack.exitScope();
-                    continue;
-                }
-                const variant = foundVariant.?;
-                try coveredVariants.put(ev.variant_name, {});
-                if (ev.binding) |binding| {
-                    const bindingType = variant.payload_type orelse Symbol.ZSTypeNotation.unknown;
-                    try self.tableStack.put(.{
-                        .name = binding,
-                        .assignable = false,
-                        .signature = bindingType,
-                    });
-                }
-            },
-            .number_literal => {},
-            .boolean_literal => {},
-            .char_literal => {},
-            .string_literal => {},
-            .struct_destructure => |sd| {
-                if (subjectType == .struct_type) {
-                    const st = subjectType.struct_type;
-                    for (sd.fields) |fp| {
-                        var fieldType: Symbol.ZSTypeNotation = .unknown;
-                        for (st.fields) |sf| {
-                            if (std.mem.eql(u8, sf.name, fp.name)) {
-                                fieldType = sf.type;
-                                break;
-                            }
+        var armInvalid = false;
+        for (arm.patterns, 0..) |pattern, patternIndex| {
+            switch (pattern) {
+                .enum_variant => |ev| {
+                    // Verify the variant belongs to the enum
+                    var foundVariant: ?sig.ZSEnumVariant = null;
+                    for (enumType.variants) |v| {
+                        if (std.mem.eql(u8, v.name, ev.variant_name)) {
+                            foundVariant = v;
+                            break;
                         }
-                        if (fp.binding_name) |bn| {
+                    }
+                    if (foundVariant == null) {
+                        try self.recordError(me, "Unknown variant in match arm");
+                        armInvalid = true;
+                    } else {
+                        const variant = foundVariant.?;
+                        try coveredVariants.put(ev.variant_name, {});
+                        if (ev.binding) |binding| {
+                            const bindingType = variant.payload_type orelse Symbol.ZSTypeNotation.unknown;
                             try self.tableStack.put(.{
-                                .name = bn,
+                                .name = binding,
                                 .assignable = false,
-                                .signature = fieldType,
+                                .signature = bindingType,
                             });
                         }
                     }
-                }
-            },
+                },
+                .number_literal, .boolean_literal, .char_literal, .string_literal => {
+                    if (!try literalPatternCompatible(self, pattern, subjectType)) {
+                        try self.recordError(me, "literal pattern is incompatible with the match subject type");
+                        armInvalid = true;
+                    }
+                },
+                .struct_destructure => |sd| {
+                    if (subjectType != .struct_type) {
+                        try self.recordError(me, "Match subject must be a struct type for struct patterns");
+                        armInvalid = true;
+                    } else {
+                        const st = subjectType.struct_type;
+                        if (!structPatternNameMatches(st.name, sd.struct_name)) {
+                            try self.recordError(me, "Struct pattern does not match the subject type");
+                            armInvalid = true;
+                        } else {
+                            for (sd.fields, 0..) |fp, fieldPatternIndex| {
+                                var fieldType: Symbol.ZSTypeNotation = .unknown;
+                                var resolvedFieldIndex: ?u32 = null;
+                                for (st.fields, 0..) |sf, structFieldIndex| {
+                                    if (std.mem.eql(u8, sf.name, fp.name)) {
+                                        fieldType = sf.type;
+                                        resolvedFieldIndex = @intCast(structFieldIndex);
+                                        break;
+                                    }
+                                }
+
+                                if (resolvedFieldIndex == null) {
+                                    try self.recordError(me, "Unknown field in struct match pattern");
+                                    armInvalid = true;
+                                    break;
+                                }
+
+                                try self.matchStructFieldIndices.put(
+                                    matchStructFieldKey(me.startPos, armIndex, patternIndex, fieldPatternIndex),
+                                    resolvedFieldIndex.?,
+                                );
+
+                                if (fp.value_pattern) |valuePattern| {
+                                    if (!try literalPatternCompatible(self, valuePattern.*, fieldType)) {
+                                        try self.recordError(me, "struct pattern field literal is incompatible with the field type");
+                                        armInvalid = true;
+                                        break;
+                                    }
+                                }
+
+                                if (fp.binding_name) |bn| {
+                                    try self.tableStack.put(.{
+                                        .name = bn,
+                                        .assignable = false,
+                                        .signature = fieldType,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                },
+            }
+            if (armInvalid) break;
+        }
+        if (armInvalid) {
+            _ = try self.tableStack.exitScope();
+            continue;
         }
 
         const armType = try self.analyzeExpr(arm.body.*);

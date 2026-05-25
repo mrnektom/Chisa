@@ -50,6 +50,13 @@ pub fn isPrimitiveScalarType(t: Symbol.ZSTypeNotation) bool {
     };
 }
 
+pub fn isIntegerScalarType(t: Symbol.ZSTypeNotation) bool {
+    return switch (t) {
+        .number, .char, .long, .short, .byte => true,
+        else => false,
+    };
+}
+
 pub const builtinScalars = .{
     .{ "number", Symbol.ZSTypeNotation.number },
     .{ "int", Symbol.ZSTypeNotation.number },

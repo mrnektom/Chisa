@@ -1,0 +1,8 @@
+struct Point { x: number, y: number }
+
+let point = Point { x: 0, y: 5 }
+let result = match point {
+    Point { x: 0, y } -> y,
+    Point { x, y }    -> x + y
+}
+print(result)

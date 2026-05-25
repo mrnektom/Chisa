@@ -50,6 +50,20 @@ fn commonEnumVariantTag(enumName: []const u8, variantName: []const u8) ?u32 {
     return null;
 }
 
+fn matchStructFieldKey(matchStartPos: usize, armIndex: usize, patternIndex: usize, fieldIndex: usize) usize {
+    return std.hash.Wyhash.hash(0, std.mem.asBytes(&[_]usize{ matchStartPos, armIndex, patternIndex, fieldIndex }));
+}
+
+fn literalFromMatchPattern(pattern: ast.expr.ZSMatchArmPattern) ?ir.ZSIRMatchLiteral {
+    return switch (pattern) {
+        .number_literal => |value| .{ .number = value },
+        .boolean_literal => |value| .{ .boolean = value },
+        .char_literal => |value| .{ .char = value },
+        .string_literal => |value| .{ .string = value },
+        else => null,
+    };
+}
+
 fn findEnumVariantMatch(self: *Self, desiredEnumName: []const u8, variantName: []const u8) ?EnumVariantMatch {
     var fallback: ?EnumVariantMatch = null;
     var ambiguous = false;
@@ -94,6 +108,7 @@ varNames: std.StringHashMap([]const u8),
 resolutions: *const std.AutoHashMap(usize, []const u8),
 overloadedNames: *const std.StringHashMap(void),
 fieldIndices: *const std.AutoHashMap(usize, u32),
+matchStructFieldIndices: *const std.AutoHashMap(usize, u32),
 enumInits: *const std.AutoHashMap(usize, Analyzer.EnumInitInfo),
 derefTypes: *const std.AutoHashMap(usize, []const u8),
 indexElemTypes: *const std.AutoHashMap(usize, []const u8),
@@ -124,6 +139,7 @@ pub const IrGenContext = struct {
     resolutions: *const std.AutoHashMap(usize, []const u8),
     overloadedNames: *const std.StringHashMap(void),
     fieldIndices: *const std.AutoHashMap(usize, u32),
+    matchStructFieldIndices: *const std.AutoHashMap(usize, u32),
     enumInits: *const std.AutoHashMap(usize, Analyzer.EnumInitInfo),
     derefTypes: *const std.AutoHashMap(usize, []const u8),
     indexElemTypes: *const std.AutoHashMap(usize, []const u8),
@@ -174,6 +190,7 @@ pub fn generate(ctx: IrGenContext) !IrGenResult {
         .resolutions = ctx.resolutions,
         .overloadedNames = ctx.overloadedNames,
         .fieldIndices = ctx.fieldIndices,
+        .matchStructFieldIndices = ctx.matchStructFieldIndices,
         .enumInits = ctx.enumInits,
         .derefTypes = ctx.derefTypes,
         .indexElemTypes = ctx.indexElemTypes,
@@ -1270,56 +1287,17 @@ fn zsSymbolTypeToIrName(t: sig.ZSType) []const u8 {
 
 fn generateMatchExpr(self: *Self, me: ast.expr.ZSMatchExpr) Error![]const u8 {
     const subjectName = try self.generateExpr(me.subject.*);
+    const firstPattern: ?ast.expr.ZSMatchArmPattern = if (me.arms.len > 0 and me.arms[0].patterns.len > 0) me.arms[0].patterns[0] else null;
 
     // Use the resolved enum name from the analyzer (handles monomorphized generic enums)
     const enumName: []const u8 = if (self.matchEnumNames) |men|
-        (men.get(me.startPos) orelse (if (me.arms.len > 0 and me.arms[0].pattern == .enum_variant) me.arms[0].pattern.enum_variant.enum_name else ""))
+        (men.get(me.startPos) orelse (if (firstPattern != null and firstPattern.? == .enum_variant) firstPattern.?.enum_variant.enum_name else ""))
     else
-        (if (me.arms.len > 0 and me.arms[0].pattern == .enum_variant) me.arms[0].pattern.enum_variant.enum_name else "");
+        (if (firstPattern != null and firstPattern.? == .enum_variant) firstPattern.?.enum_variant.enum_name else "");
 
     var irArms = try self.allocator.alloc(ir.ZSIRMatchArm, me.arms.len);
 
     for (me.arms, 0..) |arm, i| {
-        // Resolve variant tag and payload type for enum patterns
-        var variantTag: u32 = 0;
-        var variantPayloadType: ?[]const u8 = null;
-        switch (arm.pattern) {
-            .enum_variant => |ev| {
-                // First look up in top-level (entry module) enum_decl instructions
-                var found = false;
-                for (self.topLevelInstructions.items) |inst| {
-                    if (inst == .enum_decl and std.mem.eql(u8, inst.enum_decl.name, enumName)) {
-                        for (inst.enum_decl.variants) |v| {
-                            if (std.mem.eql(u8, v.name, ev.variant_name)) {
-                                variantTag = v.tag;
-                                variantPayloadType = v.payloadType;
-                                found = true;
-                                break;
-                            }
-                        }
-                        break;
-                    }
-                }
-                // Fallback: look up from monomorphizedEnums (covers cross-module generic enums)
-                if (!found) {
-                    if (self.monomorphizedEnums) |monoEnums| {
-                        if (monoEnums.get(enumName)) |enumDef| {
-                            for (enumDef.variants) |v| {
-                                if (std.mem.eql(u8, v.name, ev.variant_name)) {
-                                    variantTag = v.tag;
-                                    if (v.payload_type) |pt| {
-                                        variantPayloadType = zsSymbolTypeToIrName(pt);
-                                    }
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-            },
-            else => {},
-        }
-
         // Generate body instructions into a separate list
         var bodyInstructions = try std.ArrayList(ir.ZSIR).initCapacity(self.allocator, 4);
         defer bodyInstructions.deinit(self.allocator);
@@ -1341,10 +1319,72 @@ fn generateMatchExpr(self: *Self, me: ast.expr.ZSMatchExpr) Error![]const u8 {
             self.varNames = outerVarNames;
         }
 
+        var variantPayloadType: ?[]const u8 = null;
+        var irPatterns = try self.allocator.alloc(ir.ZSIRMatchPattern, arm.patterns.len);
+        for (arm.patterns, 0..) |pattern, patternIndex| {
+            irPatterns[patternIndex] = switch (pattern) {
+                .enum_variant => |ev| blk: {
+                    var variantTag: u32 = 0;
+                    var found = false;
+                    for (self.topLevelInstructions.items) |inst| {
+                        if (inst == .enum_decl and std.mem.eql(u8, inst.enum_decl.name, enumName)) {
+                            for (inst.enum_decl.variants) |v| {
+                                if (std.mem.eql(u8, v.name, ev.variant_name)) {
+                                    variantTag = v.tag;
+                                    variantPayloadType = v.payloadType;
+                                    found = true;
+                                    break;
+                                }
+                            }
+                            break;
+                        }
+                    }
+                    if (!found) {
+                        if (self.monomorphizedEnums) |monoEnums| {
+                            if (monoEnums.get(enumName)) |enumDef| {
+                                for (enumDef.variants) |v| {
+                                    if (std.mem.eql(u8, v.name, ev.variant_name)) {
+                                        variantTag = v.tag;
+                                        if (v.payload_type) |pt| {
+                                            variantPayloadType = zsSymbolTypeToIrName(pt);
+                                        }
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    break :blk .{ .variant_tag = variantTag };
+                },
+                .number_literal, .boolean_literal, .char_literal, .string_literal => .{
+                    .literal = literalFromMatchPattern(pattern).?,
+                },
+                .struct_destructure => |sd| blk: {
+                    var fieldPatterns = try self.allocator.alloc(ir.ZSIRStructFieldPattern, sd.fields.len);
+                    for (sd.fields, 0..) |field, fieldPatternIndex| {
+                        var bindingIrName: ?[]const u8 = null;
+                        if (field.binding_name) |binding| {
+                            bindingIrName = try self.generateName();
+                            try self.varNames.put(binding, bindingIrName.?);
+                        }
+
+                        fieldPatterns[fieldPatternIndex] = .{
+                            .fieldIndex = self.matchStructFieldIndices.get(
+                                matchStructFieldKey(me.startPos, i, patternIndex, fieldPatternIndex),
+                            ) orelse unreachable,
+                            .binding = bindingIrName,
+                            .literal = if (field.value_pattern) |valuePattern| literalFromMatchPattern(valuePattern.*) else null,
+                        };
+                    }
+                    break :blk .{ .struct_destructure = fieldPatterns };
+                },
+            };
+        }
+
         // If there's a binding (enum variant), add it to varNames
         var bindingIrName: ?[]const u8 = null;
-        if (arm.pattern == .enum_variant) {
-            if (arm.pattern.enum_variant.binding) |binding| {
+        if (arm.patterns.len > 0 and arm.patterns[0] == .enum_variant) {
+            if (arm.patterns[0].enum_variant.binding) |binding| {
                 bindingIrName = try self.generateName();
                 try self.varNames.put(binding, bindingIrName.?);
             }
@@ -1355,26 +1395,8 @@ fn generateMatchExpr(self: *Self, me: ast.expr.ZSMatchExpr) Error![]const u8 {
         self.varNames.deinit();
         self.varNames = outerVarNames;
 
-        const patternKind: ir.ZSIRMatchPatternKind = switch (arm.pattern) {
-            .enum_variant => .variant_tag,
-            .number_literal => .number_literal,
-            .boolean_literal => .boolean_literal,
-            .char_literal => .char_literal,
-            .string_literal => .string_literal,
-            .struct_destructure => .struct_destructure,
-        };
-        const literalValue: []const u8 = switch (arm.pattern) {
-            .number_literal => |v| v,
-            .string_literal => |v| v,
-            .boolean_literal => |v| if (v) "true" else "false",
-            .char_literal => |v| try std.fmt.allocPrint(self.allocator, "{c}", .{v}),
-            else => "",
-        };
-
         irArms[i] = .{
-            .patternKind = patternKind,
-            .variantTag = variantTag,
-            .literalValue = literalValue,
+            .patterns = irPatterns,
             .binding = bindingIrName,
             .bindingType = variantPayloadType,
             .body = try self.allocator.dupe(ir.ZSIR, bodyInstructions.items),
@@ -1515,17 +1537,19 @@ fn generateSafeNav(self: *Self, sn: ast.expr.ZSSafeNav) Error![]const u8 {
     } });
 
     const arms = try self.allocator.alloc(ir.ZSIRMatchArm, 2);
+    const somePatterns = try self.allocator.alloc(ir.ZSIRMatchPattern, 1);
+    somePatterns[0] = .{ .variant_tag = someTag };
     arms[0] = .{
-        .patternKind = .variant_tag,
-        .variantTag = someTag,
+        .patterns = somePatterns,
         .binding = bindingName,
         .bindingType = somePayloadType,
         .body = try self.allocator.dupe(ir.ZSIR, someBody.items),
         .resultName = someArmResult,
     };
+    const nonePatterns = try self.allocator.alloc(ir.ZSIRMatchPattern, 1);
+    nonePatterns[0] = .{ .variant_tag = noneTag };
     arms[1] = .{
-        .patternKind = .variant_tag,
-        .variantTag = noneTag,
+        .patterns = nonePatterns,
         .binding = null,
         .bindingType = null,
         .body = try self.allocator.dupe(ir.ZSIR, noneBody.items),

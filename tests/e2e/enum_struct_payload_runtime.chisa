@@ -1,0 +1,18 @@
+struct Point {
+  a: number,
+  b: number,
+  c: number,
+  d: number,
+}
+
+enum Wrap {
+  Left(number),
+  Right(Point),
+}
+
+let value = Wrap.Right(Point { a: 1, b: 2, c: 3, d: 10 })
+
+match value {
+  Wrap.Right(point) -> print(point.a + point.b + point.c + point.d),
+  Wrap.Left(n) -> print(n),
+}

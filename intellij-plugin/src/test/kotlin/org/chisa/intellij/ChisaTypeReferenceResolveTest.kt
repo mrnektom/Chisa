@@ -73,6 +73,26 @@ class ChisaTypeReferenceResolveTest : BasePlatformTestCase() {
         assertEquals("MyStruct", (resolved as ChisaStructDeclaration).name)
     }
 
+    fun testCastTargetTypeReferenceResolvesToStruct() {
+        val file = myFixture.configureByText(
+            "test.chisa",
+            """
+            struct Point { }
+            let value = 1;
+            let casted = value as Point;
+            """.trimIndent()
+        )
+
+        val typeRefs = PsiTreeUtil.findChildrenOfType(file, ChisaTypeReferenceElement::class.java)
+        val pointRef = typeRefs.find { it.getReferenceName() == "Point" }
+        assertNotNull("Cast target should be parsed as a TYPE_REFERENCE", pointRef)
+
+        val resolved = pointRef!!.reference?.resolve()
+        assertNotNull("Cast target type reference should resolve", resolved)
+        assertInstanceOf(resolved, ChisaStructDeclaration::class.java)
+        assertEquals("Point", (resolved as ChisaStructDeclaration).name)
+    }
+
     fun testTypeReferenceUnresolved() {
         val file = myFixture.configureByText(
             "test.chisa",

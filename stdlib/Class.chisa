@@ -1,0 +1,9 @@
+import { String } from "./String.chisa"
+export struct ObjectHeaders {
+
+}
+
+struct Class<T> {
+  name: String,
+
+}

@@ -1,0 +1,7 @@
+let text = "a\nb"
+let result = match text {
+    "x"    -> 1,
+    "a\nb" -> 7,
+    else   -> 9
+}
+print(result)

@@ -459,7 +459,7 @@ pub fn analyzeStmt(self: anytype, stmt: ast.stmt.ZSStmt) Error!?Symbol {
                 try self.tableStack.put(.{
                     .name = out.name,
                     .assignable = true,
-                    .signature = Symbol.ZSTypeNotation.number,
+                    .signature = Symbol.ZSTypeNotation.long,
                 });
             }
             return null;

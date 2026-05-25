@@ -638,6 +638,10 @@ class ChisaParser : PsiParser {
             b.advanceLexer()
         }
         parsePrimaryExpression(b, allowStructLit)
+        while (b.tokenType == ChisaTokenTypes.AS) {
+            b.advanceLexer() // eat as
+            parseTypeReference(b)
+        }
     }
 
     private fun parsePrimaryExpression(b: PsiBuilder, allowStructLit: Boolean = true) {
@@ -785,7 +789,15 @@ class ChisaParser : PsiParser {
             while (!b.eof() && b.tokenType != ChisaTokenTypes.RBRACE) {
                 val before = b.currentOffset
                 val armMarker = b.mark()
-                parseMatchPattern(b)
+                val firstPatternIsLiteral = parseMatchPattern(b)
+                while (b.tokenType == ChisaTokenTypes.COMMA) {
+                    if (!firstPatternIsLiteral) {
+                        b.error("Only literal match patterns can be grouped with commas")
+                        break
+                    }
+                    b.advanceLexer() // eat pattern separator
+                    parseLiteralMatchPattern(b)
+                }
                 if (b.tokenType == ChisaTokenTypes.ARROW) {
                     b.advanceLexer() // eat ->
                     parseExpression(b)
@@ -802,14 +814,35 @@ class ChisaParser : PsiParser {
         marker.done(ChisaElementTypes.MATCH_EXPRESSION)
     }
 
-    private fun parseMatchPattern(b: PsiBuilder) {
+    private fun parseLiteralMatchPattern(b: PsiBuilder) {
         when (b.tokenType) {
-            ChisaTokenTypes.ELSE -> b.advanceLexer()
             ChisaTokenTypes.NUMBER_LITERAL,
             ChisaTokenTypes.STRING_LITERAL,
             ChisaTokenTypes.CHAR_LITERAL,
             ChisaTokenTypes.TRUE,
             ChisaTokenTypes.FALSE -> b.advanceLexer()
+
+            else -> {
+                b.error("Expected literal match pattern")
+                if (!b.eof()) b.advanceLexer()
+            }
+        }
+    }
+
+    private fun parseMatchPattern(b: PsiBuilder): Boolean {
+        when (b.tokenType) {
+            ChisaTokenTypes.ELSE -> {
+                b.advanceLexer()
+                return false
+            }
+            ChisaTokenTypes.NUMBER_LITERAL,
+            ChisaTokenTypes.STRING_LITERAL,
+            ChisaTokenTypes.CHAR_LITERAL,
+            ChisaTokenTypes.TRUE,
+            ChisaTokenTypes.FALSE -> {
+                b.advanceLexer()
+                return true
+            }
 
             ChisaTokenTypes.IDENTIFIER -> {
                 val nameMarker = b.mark()
@@ -827,26 +860,31 @@ class ChisaParser : PsiParser {
                         if (b.tokenType == ChisaTokenTypes.LPAREN) {
                             parseEnumPayloadPattern(b)
                         }
+                        return false
                     }
 
                     ChisaTokenTypes.LBRACE -> {
                         // StructName { field: val, field2 }
                         nameMarker.done(ChisaElementTypes.REFERENCE_EXPRESSION)
                         parseStructPatternBody(b)
+                        return false
                     }
 
                     else -> {
                         // Plain binding identifier — binds the matched value to a variable
                         nameMarker.done(ChisaElementTypes.MATCH_BINDING)
+                        return false
                     }
                 }
             }
 
             else -> {
                 b.error("Expected match pattern")
-                b.advanceLexer()
+                if (!b.eof()) b.advanceLexer()
+                return false
             }
         }
+        return false
     }
 
     /** Parses `(binding1, binding2, ...)` in an enum variant pattern. Each identifier becomes a MATCH_BINDING. */

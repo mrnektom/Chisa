@@ -44,15 +44,21 @@ pub fn analyzeCast(self: anytype, cast: ast.expr.ZSCast) Error!Symbol.ZSTypeNota
     self.expectedType = savedExpected;
 
     const targetType = try type_resolver.resolveTypeAnnotationFull(self, cast.target_type);
+    const primitiveCast = type_resolver.isPrimitiveScalarType(sourceType) and type_resolver.isPrimitiveScalarType(targetType);
+    const pointerIntegerCast = (sourceType == .pointer and type_resolver.isIntegerScalarType(targetType)) or
+        (targetType == .pointer and type_resolver.isIntegerScalarType(sourceType));
 
-    if (!type_resolver.isPrimitiveScalarType(sourceType)) {
-        try self.recordError(cast, "left side of 'as' must be a primitive scalar type");
+    if (!primitiveCast and !pointerIntegerCast and sourceType != .pointer and !type_resolver.isPrimitiveScalarType(sourceType)) {
+        try self.recordError(cast, "left side of 'as' must be a primitive scalar type or Pointer<T>");
     }
-    if (!type_resolver.isPrimitiveScalarType(targetType)) {
-        try self.recordError(cast, "target type of 'as' must be a primitive scalar type");
+    if (!primitiveCast and !pointerIntegerCast and targetType != .pointer and !type_resolver.isPrimitiveScalarType(targetType)) {
+        try self.recordError(cast, "target type of 'as' must be a primitive scalar type or Pointer<T>");
+    }
+    if (!primitiveCast and !pointerIntegerCast and (sourceType == .pointer or targetType == .pointer)) {
+        try self.recordError(cast, "Pointer<T> casts only support integer scalar types");
     }
 
-    if (type_resolver.isPrimitiveScalarType(sourceType) and type_resolver.isPrimitiveScalarType(targetType)) {
+    if (primitiveCast or pointerIntegerCast) {
         try self.primitiveCastInfo.put(cast.endPos, .{
             .sourceType = type_resolver.typeToString(sourceType),
             .targetType = type_resolver.typeToString(targetType),
@@ -60,6 +66,27 @@ pub fn analyzeCast(self: anytype, cast: ast.expr.ZSCast) Error!Symbol.ZSTypeNota
     }
 
     return targetType;
+}
+
+fn exprAlwaysTerminates(expr: ast.expr.ZSExpr) bool {
+    return switch (expr) {
+        .return_expr, .break_expr, .continue_expr => true,
+        .block => |block| blk: {
+            if (block.stmts.len == 0) break :blk false;
+            const last = block.stmts[block.stmts.len - 1];
+            break :blk switch (last) {
+                .expr => exprAlwaysTerminates(last.expr),
+                else => false,
+            };
+        },
+        .if_expr => |ifExpr| blk: {
+            if (ifExpr.else_branch) |elseBranch| {
+                break :blk exprAlwaysTerminates(ifExpr.then_branch.*) and exprAlwaysTerminates(elseBranch.*);
+            }
+            break :blk false;
+        },
+        else => false,
+    };
 }
 
 pub fn analyzeLambda(self: anytype, lambda: ast.expr.ZSLambda) Error!Symbol.ZSTypeNotation {
@@ -198,7 +225,7 @@ pub fn analyzeIfExpr(self: anytype, ifExpr: ast.expr.ZSIfExpr) Error!Symbol.ZSTy
         }
         return thenType;
     }
-    if (!self.statementExprContext) {
+    if (!self.statementExprContext and !exprAlwaysTerminates(ifExpr.then_branch.*)) {
         try self.recordError(ifExpr, "if expression used as a value must have an else branch");
     }
     return Symbol.ZSTypeNotation.void;
@@ -329,7 +356,7 @@ pub fn analyzeBlock(self: anytype, block: ast.expr.ZSBlock) Error!Symbol.ZSTypeN
             },
             .expr => {
                 const savedStatementContext = self.statementExprContext;
-                self.statementExprContext = i + 1 < block.stmts.len;
+                self.statementExprContext = savedStatementContext or i + 1 < block.stmts.len;
                 defer self.statementExprContext = savedStatementContext;
                 lastType = try self.analyzeExpr(node.expr);
             },

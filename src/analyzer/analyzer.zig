@@ -36,6 +36,7 @@ scalarDefs: std.StringHashMap(Symbol.ZSTypeNotation),
 structDefs: std.StringHashMap(StructDef),
 exportedStructDefs: std.StringHashMap(StructDef),
 fieldIndices: std.AutoHashMap(usize, u32),
+matchStructFieldIndices: std.AutoHashMap(usize, u32),
 enumDefs: std.StringHashMap(EnumDef),
 exportedEnumDefs: std.StringHashMap(EnumDef),
 useAliases: std.StringHashMap(UseAlias),
@@ -162,6 +163,7 @@ pub const AnalyzeResult = struct {
     structDefs: std.StringHashMap(StructDef),
     exportedStructDefs: std.StringHashMap(StructDef),
     fieldIndices: std.AutoHashMap(usize, u32),
+    matchStructFieldIndices: std.AutoHashMap(usize, u32),
     enumDefs: std.StringHashMap(EnumDef),
     exportedEnumDefs: std.StringHashMap(EnumDef),
     allocatedEnumVariants: std.ArrayList([]sig.ZSEnumVariant),
@@ -257,6 +259,7 @@ pub const AnalyzeResult = struct {
         self.structDefs.deinit();
         self.exportedStructDefs.deinit();
         self.fieldIndices.deinit();
+        self.matchStructFieldIndices.deinit();
         self.enumDefs.deinit();
         self.exportedEnumDefs.deinit();
 
@@ -323,6 +326,7 @@ pub fn analyzeWithPrelude(module: zsm.ZSModule, allocator: std.mem.Allocator, de
         .structDefs = std.StringHashMap(StructDef).init(allocator),
         .exportedStructDefs = std.StringHashMap(StructDef).init(allocator),
         .fieldIndices = std.AutoHashMap(usize, u32).init(allocator),
+        .matchStructFieldIndices = std.AutoHashMap(usize, u32).init(allocator),
         .enumDefs = std.StringHashMap(EnumDef).init(allocator),
         .exportedEnumDefs = std.StringHashMap(EnumDef).init(allocator),
         .useAliases = std.StringHashMap(UseAlias).init(allocator),
@@ -417,6 +421,7 @@ pub fn analyzeWithPrelude(module: zsm.ZSModule, allocator: std.mem.Allocator, de
         .structDefs = analyzer.structDefs,
         .exportedStructDefs = analyzer.exportedStructDefs,
         .fieldIndices = analyzer.fieldIndices,
+        .matchStructFieldIndices = analyzer.matchStructFieldIndices,
         .enumDefs = analyzer.enumDefs,
         .exportedEnumDefs = analyzer.exportedEnumDefs,
         .allocatedEnumVariants = analyzer.allocatedEnumVariants,

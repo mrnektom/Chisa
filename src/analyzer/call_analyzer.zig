@@ -30,7 +30,10 @@ pub fn analyzeCall(self: anytype, call: ast.expr.ZSCall) Error!Symbol.ZSTypeNota
             }
             const argType = try self.analyzeExpr(call.arguments[0]);
             const innerPtr = try self.allocator.create(Symbol.ZSTypeNotation);
-            innerPtr.* = argType;
+            innerPtr.* = switch (argType) {
+                .array_type => argType.array_type.element_type.*,
+                else => argType,
+            };
             try self.allocatedTypes.append(self.allocator, innerPtr);
             return Symbol.ZSTypeNotation{ .pointer = innerPtr };
         }

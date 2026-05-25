@@ -1,0 +1,4 @@
+fn main(): long {
+    let ptr = 0 as Pointer<char>
+    return ptr as long
+}

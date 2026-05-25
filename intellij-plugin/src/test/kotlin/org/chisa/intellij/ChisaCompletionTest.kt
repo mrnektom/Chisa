@@ -114,6 +114,20 @@ class ChisaCompletionTest : BasePlatformTestCase() {
         assertTrue("Should contain 'Point', got: $names", names.contains("Point"))
     }
 
+    fun testCompletionAfterAsShowsTypes() {
+        myFixture.configureByText(
+            "main.chisa",
+            """
+            struct Point { x: number, y: number }
+            let x = 1 as P<caret>
+            """.trimIndent()
+        )
+        val lookups = myFixture.completeBasic()
+        assertNotNull("Completion should return results", lookups)
+        val names = lookups.map { it.lookupString }
+        assertTrue("Should contain 'Point', got: $names", names.contains("Point"))
+    }
+
     fun testCompletionInUseShowsEnumVariants() {
         myFixture.configureByText(
             "main.chisa",

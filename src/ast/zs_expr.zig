@@ -379,9 +379,25 @@ pub const ZSMatchArmPattern = union(enum) {
 };
 
 pub const ZSMatchArm = struct {
-    pattern: ZSMatchArmPattern,
+    patterns: []ZSMatchArmPattern,
     body: *ZSExpr,
 };
+
+fn deinitMatchArmPattern(pattern: *ZSMatchArmPattern, allocator: std.mem.Allocator) void {
+    switch (pattern.*) {
+        .string_literal => |value| allocator.free(value),
+        .struct_destructure => |sd| {
+            for (sd.fields) |field| {
+                if (field.value_pattern) |value_pattern| {
+                    deinitMatchArmPattern(value_pattern, allocator);
+                    allocator.destroy(value_pattern);
+                }
+            }
+            allocator.free(sd.fields);
+        },
+        else => {},
+    }
+}
 
 pub const ZSMatchExpr = struct {
     subject: *ZSExpr,
@@ -395,6 +411,10 @@ pub const ZSMatchExpr = struct {
         self.subject.deinit(allocator);
         allocator.destroy(self.subject);
         for (self.arms) |*arm| {
+            for (arm.patterns) |*pattern| {
+                deinitMatchArmPattern(pattern, allocator);
+            }
+            allocator.free(arm.patterns);
             arm.body.deinit(allocator);
             allocator.destroy(arm.body);
         }

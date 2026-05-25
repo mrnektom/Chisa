@@ -175,6 +175,7 @@ fn compileModule(self: *Self, path: []const u8, injectPreludeIntoStdlib: bool) !
         return error.CircularImport;
     }
     try self.inProgress.put(path, {});
+    errdefer _ = self.inProgress.remove(path);
 
     // Read file
     const buffer = std.Io.Dir.cwd().readFileAlloc(self.io, path, allocator, .limited(16 * 1024 * 1024)) catch |err| {
@@ -265,7 +266,7 @@ fn compileModule(self: *Self, path: []const u8, injectPreludeIntoStdlib: bool) !
     }
 
     // Analyze
-    const analyzeResult = try Analyzer.analyzeWithPrelude(
+    var analyzeResult = try Analyzer.analyzeWithPrelude(
         module,
         allocator,
         &depAnalyzeResults,
@@ -276,6 +277,14 @@ fn compileModule(self: *Self, path: []const u8, injectPreludeIntoStdlib: bool) !
         preludeGenericFns,
         preludeScalarDefs,
     );
+    errdefer analyzeResult.deinit(allocator);
+
+    if (analyzeResult.errors.len != 0) {
+        for (analyzeResult.errors) |e| {
+            std.debug.print("{f}\n", .{e});
+        }
+        return error.AnalysisFailed;
+    }
 
     // Generate IR
     const irResult = try IRGen.generate(.{
@@ -284,6 +293,7 @@ fn compileModule(self: *Self, path: []const u8, injectPreludeIntoStdlib: bool) !
         .resolutions = &analyzeResult.resolutions,
         .overloadedNames = &analyzeResult.overloadedNames,
         .fieldIndices = &analyzeResult.fieldIndices,
+        .matchStructFieldIndices = &analyzeResult.matchStructFieldIndices,
         .enumInits = &analyzeResult.enumInits,
         .derefTypes = &analyzeResult.derefTypes,
         .indexElemTypes = &analyzeResult.indexElemTypes,
@@ -511,166 +521,169 @@ pub fn compile(self: *Self, args: Args.ExecutionArgs) !void {
         try dump_symbols.dump(allocator, self.io, analyzeResult);
     }
 
-    if (analyzeResult.errors.len == 0) {
-        if (args.verbose) std.debug.print("Generating ir\n", .{});
-        var entryIrResult = try IRGen.generate(.{
-            .module = &module,
-            .allocator = allocator,
-            .resolutions = &analyzeResult.resolutions,
-            .overloadedNames = &analyzeResult.overloadedNames,
-            .fieldIndices = &analyzeResult.fieldIndices,
-            .enumInits = &analyzeResult.enumInits,
-            .derefTypes = &analyzeResult.derefTypes,
-            .indexElemTypes = &analyzeResult.indexElemTypes,
-            .arrayLiteralElemTypes = &analyzeResult.arrayLiteralElemTypes,
-            .monomorphizedFunctions = analyzeResult.monomorphizedFunctions.items,
-            .structInitResolutions = &analyzeResult.structInitResolutions,
-            .importedVarNames = &importedVarNames,
-            .monomorphizedEnums = &analyzeResult.monomorphizedEnums,
-            .matchEnumNames = &analyzeResult.matchEnumNames,
-            .extensionCalls = &analyzeResult.extensionCalls,
-            .lambdaNames = &analyzeResult.lambdaNames,
-            .lambdaTypes = &analyzeResult.lambdaTypes,
-            .safeNavInfo = &analyzeResult.safeNavInfo,
-            .returnWrapInfo = &analyzeResult.returnWrapInfo,
-            .primitiveCastInfo = &analyzeResult.primitiveCastInfo,
-        });
-        defer entryIrResult.deinit(allocator);
+    if (analyzeResult.errors.len != 0) {
+        return error.AnalysisFailed;
+    }
 
-        // Merge dependency IR with entry module IR
-        const mergedIr = try mergeIr(allocator, depCompiled.items, &entryIrResult.instructions);
-        // Only free the merged instructions array, not individual instructions (owned by deps/entry)
-        defer allocator.free(mergedIr.instructions);
+    if (args.verbose) std.debug.print("Generating ir\n", .{});
+    var entryIrResult = try IRGen.generate(.{
+        .module = &module,
+        .allocator = allocator,
+        .resolutions = &analyzeResult.resolutions,
+        .overloadedNames = &analyzeResult.overloadedNames,
+        .fieldIndices = &analyzeResult.fieldIndices,
+        .matchStructFieldIndices = &analyzeResult.matchStructFieldIndices,
+        .enumInits = &analyzeResult.enumInits,
+        .derefTypes = &analyzeResult.derefTypes,
+        .indexElemTypes = &analyzeResult.indexElemTypes,
+        .arrayLiteralElemTypes = &analyzeResult.arrayLiteralElemTypes,
+        .monomorphizedFunctions = analyzeResult.monomorphizedFunctions.items,
+        .structInitResolutions = &analyzeResult.structInitResolutions,
+        .importedVarNames = &importedVarNames,
+        .monomorphizedEnums = &analyzeResult.monomorphizedEnums,
+        .matchEnumNames = &analyzeResult.matchEnumNames,
+        .extensionCalls = &analyzeResult.extensionCalls,
+        .lambdaNames = &analyzeResult.lambdaNames,
+        .lambdaTypes = &analyzeResult.lambdaTypes,
+        .safeNavInfo = &analyzeResult.safeNavInfo,
+        .returnWrapInfo = &analyzeResult.returnWrapInfo,
+        .primitiveCastInfo = &analyzeResult.primitiveCastInfo,
+    });
+    defer entryIrResult.deinit(allocator);
 
-        if (args.dumpIr or args.run or args.outputPath != null) {
-            if (args.verbose) std.debug.print("Generating llvm\n", .{});
+    // Merge dependency IR with entry module IR
+    const mergedIr = try mergeIr(allocator, depCompiled.items, &entryIrResult.instructions);
+    // Only free the merged instructions array, not individual instructions (owned by deps/entry)
+    defer allocator.free(mergedIr.instructions);
 
-            // Build struct field types map from all struct defs
-            var depStructDefPtrs = try std.ArrayList(*const std.StringHashMap(Analyzer.StructDef)).initCapacity(allocator, depCompiled.items.len);
-            defer depStructDefPtrs.deinit(allocator);
-            for (depCompiled.items) |dep| {
-                try depStructDefPtrs.append(allocator, &dep.analyzeResult.structDefs);
-                try depStructDefPtrs.append(allocator, &dep.analyzeResult.exportedStructDefs);
+    if (args.dumpIr or args.run or args.outputPath != null) {
+        if (args.verbose) std.debug.print("Generating llvm\n", .{});
+
+        // Build struct field types map from all struct defs
+        var depStructDefPtrs = try std.ArrayList(*const std.StringHashMap(Analyzer.StructDef)).initCapacity(allocator, depCompiled.items.len);
+        defer depStructDefPtrs.deinit(allocator);
+        for (depCompiled.items) |dep| {
+            try depStructDefPtrs.append(allocator, &dep.analyzeResult.structDefs);
+            try depStructDefPtrs.append(allocator, &dep.analyzeResult.exportedStructDefs);
+        }
+        var structFieldTypes = try buildStructFieldTypes(allocator, &analyzeResult.structDefs, depStructDefPtrs.items);
+        defer {
+            var sfIter = structFieldTypes.iterator();
+            while (sfIter.next()) |entry| {
+                for (entry.value_ptr.*) |fieldType| allocator.free(fieldType);
+                allocator.free(entry.value_ptr.*);
             }
-            var structFieldTypes = try buildStructFieldTypes(allocator, &analyzeResult.structDefs, depStructDefPtrs.items);
-            defer {
-                var sfIter = structFieldTypes.iterator();
-                while (sfIter.next()) |entry| {
-                    for (entry.value_ptr.*) |fieldType| allocator.free(fieldType);
-                    allocator.free(entry.value_ptr.*);
-                }
-                structFieldTypes.deinit();
-            }
+            structFieldTypes.deinit();
+        }
 
-            const llvmModule = try llvm.generateLLVMModule(&mergedIr, allocator, &structFieldTypes, module.source, module.filename, args.debug);
+        const llvmModule = try llvm.generateLLVMModule(&mergedIr, allocator, &structFieldTypes, module.source, module.filename, args.debug);
 
-            if (args.dumpIr) {
-                const irStr = core.LLVMPrintModuleToString(llvmModule);
-                defer core.LLVMDisposeMessage(irStr);
-                const irSlice = std.mem.span(irStr);
-                if (args.outputPath) |outputPath| {
-                    const irPath = try std.fmt.allocPrint(allocator, "{s}.ll", .{outputPath});
-                    defer allocator.free(irPath);
-                    const ll_with_newline = try std.mem.concat(allocator, u8, &.{ irSlice, "\n" });
-                    defer allocator.free(ll_with_newline);
-                    try std.Io.Dir.cwd().writeFile(self.io, .{
-                        .sub_path = irPath,
-                        .data = ll_with_newline,
-                    });
-                } else {
-                    try std.Io.File.stdout().writeStreamingAll(self.io, irSlice);
-                    try std.Io.File.stdout().writeStreamingAll(self.io, "\n");
-                }
-            }
-
+        if (args.dumpIr) {
+            const irStr = core.LLVMPrintModuleToString(llvmModule);
+            defer core.LLVMDisposeMessage(irStr);
+            const irSlice = std.mem.span(irStr);
             if (args.outputPath) |outputPath| {
-                // Compilation mode: emit object file and link
-                llvm.generateMain(llvmModule);
-
-                const tmpObjPathSlice = try std.fmt.allocPrint(allocator, "/tmp/zs_output_{x}.o", .{
-                    std.hash.Wyhash.hash(0, outputPath),
+                const irPath = try std.fmt.allocPrint(allocator, "{s}.ll", .{outputPath});
+                defer allocator.free(irPath);
+                const ll_with_newline = try std.mem.concat(allocator, u8, &.{ irSlice, "\n" });
+                defer allocator.free(ll_with_newline);
+                try std.Io.Dir.cwd().writeFile(self.io, .{
+                    .sub_path = irPath,
+                    .data = ll_with_newline,
                 });
-                defer allocator.free(tmpObjPathSlice);
-                const tmpObjPath = try allocator.dupeZ(u8, tmpObjPathSlice);
-                defer allocator.free(tmpObjPath);
-                try llvm.emitObjectFile(llvmModule, tmpObjPath);
-                core.LLVMDisposeModule(llvmModule);
-
-                // Link with cc
-                const ccResult = try std.process.run(allocator, self.io, .{
-                    .argv = &.{ "zig", "cc", "-o", outputPath, tmpObjPath, "-ldl" },
-                });
-                defer allocator.free(ccResult.stdout);
-                defer allocator.free(ccResult.stderr);
-
-                const linkFailed = switch (ccResult.term) {
-                    .exited => |code| code != 0,
-                    else => true,
-                };
-                if (linkFailed) {
-                    std.debug.print("Linker error:\n{s}\n", .{ccResult.stderr});
-                    return;
-                }
-
-                // Clean up temp file
-                std.Io.Dir.cwd().deleteFile(self.io, tmpObjPathSlice) catch {};
-
-                std.debug.print("Compiled to {s}\n", .{outputPath});
-            } else if (args.run) {
-                if (args.verbose) std.debug.print("Running\n", .{});
-                llvm.generateMain(llvmModule);
-
-                const tmpObjPathSlice = try std.fmt.allocPrint(allocator, "/tmp/zs_run_output_{x}.o", .{
-                    std.hash.Wyhash.hash(0, args.entryPoint),
-                });
-                defer allocator.free(tmpObjPathSlice);
-                const tmpExePathSlice = try std.fmt.allocPrint(allocator, "/tmp/zs_run_output_{x}", .{
-                    std.hash.Wyhash.hash(0, args.entryPoint),
-                });
-                defer allocator.free(tmpExePathSlice);
-                const tmpObjPath = try allocator.dupeZ(u8, tmpObjPathSlice);
-                defer allocator.free(tmpObjPath);
-                const tmpExePath = try allocator.dupeZ(u8, tmpExePathSlice);
-                defer allocator.free(tmpExePath);
-                try llvm.emitObjectFile(llvmModule, tmpObjPath);
-                core.LLVMDisposeModule(llvmModule);
-                defer std.Io.Dir.cwd().deleteFile(self.io, tmpObjPathSlice) catch {};
-                defer std.Io.Dir.cwd().deleteFile(self.io, tmpExePathSlice) catch {};
-
-                const ccResult = try std.process.run(allocator, self.io, .{
-                    .argv = &.{ "zig", "cc", "-o", tmpExePath, tmpObjPath, "-ldl" },
-                });
-                defer allocator.free(ccResult.stdout);
-                defer allocator.free(ccResult.stderr);
-
-                const linkFailed = switch (ccResult.term) {
-                    .exited => |code| code != 0,
-                    else => true,
-                };
-                if (linkFailed) {
-                    std.debug.print("Linker error:\n{s}\n", .{ccResult.stderr});
-                    return;
-                }
-
-                const entryDirPath = std.fs.path.dirname(args.entryPoint) orelse ".";
-                const runResult = try std.process.run(allocator, self.io, .{
-                    .argv = &.{tmpExePath},
-                    .cwd = .{ .path = entryDirPath },
-                });
-                defer allocator.free(runResult.stdout);
-                defer allocator.free(runResult.stderr);
-
-                if (runResult.stdout.len > 0) try std.Io.File.stdout().writeStreamingAll(self.io, runResult.stdout);
-                if (runResult.stderr.len > 0) try std.Io.File.stderr().writeStreamingAll(self.io, runResult.stderr);
-
-                const runFailed = switch (runResult.term) {
-                    .exited => |code| code != 0,
-                    else => true,
-                };
-                if (runFailed) return;
             } else {
-                core.LLVMDisposeModule(llvmModule);
+                try std.Io.File.stdout().writeStreamingAll(self.io, irSlice);
+                try std.Io.File.stdout().writeStreamingAll(self.io, "\n");
             }
+        }
+
+        if (args.outputPath) |outputPath| {
+            // Compilation mode: emit object file and link
+            llvm.generateMain(llvmModule);
+
+            const tmpObjPathSlice = try std.fmt.allocPrint(allocator, "/tmp/zs_output_{x}.o", .{
+                std.hash.Wyhash.hash(0, outputPath),
+            });
+            defer allocator.free(tmpObjPathSlice);
+            const tmpObjPath = try allocator.dupeZ(u8, tmpObjPathSlice);
+            defer allocator.free(tmpObjPath);
+            try llvm.emitObjectFile(llvmModule, tmpObjPath);
+            core.LLVMDisposeModule(llvmModule);
+
+            // Link with cc
+            const ccResult = try std.process.run(allocator, self.io, .{
+                .argv = &.{ "zig", "cc", "-o", outputPath, tmpObjPath, "-ldl" },
+            });
+            defer allocator.free(ccResult.stdout);
+            defer allocator.free(ccResult.stderr);
+
+            const linkFailed = switch (ccResult.term) {
+                .exited => |code| code != 0,
+                else => true,
+            };
+            if (linkFailed) {
+                std.debug.print("Linker error:\n{s}\n", .{ccResult.stderr});
+                return;
+            }
+
+            // Clean up temp file
+            std.Io.Dir.cwd().deleteFile(self.io, tmpObjPathSlice) catch {};
+
+            std.debug.print("Compiled to {s}\n", .{outputPath});
+        } else if (args.run) {
+            if (args.verbose) std.debug.print("Running\n", .{});
+            llvm.generateMain(llvmModule);
+
+            const tmpObjPathSlice = try std.fmt.allocPrint(allocator, "/tmp/zs_run_output_{x}.o", .{
+                std.hash.Wyhash.hash(0, args.entryPoint),
+            });
+            defer allocator.free(tmpObjPathSlice);
+            const tmpExePathSlice = try std.fmt.allocPrint(allocator, "/tmp/zs_run_output_{x}", .{
+                std.hash.Wyhash.hash(0, args.entryPoint),
+            });
+            defer allocator.free(tmpExePathSlice);
+            const tmpObjPath = try allocator.dupeZ(u8, tmpObjPathSlice);
+            defer allocator.free(tmpObjPath);
+            const tmpExePath = try allocator.dupeZ(u8, tmpExePathSlice);
+            defer allocator.free(tmpExePath);
+            try llvm.emitObjectFile(llvmModule, tmpObjPath);
+            core.LLVMDisposeModule(llvmModule);
+            defer std.Io.Dir.cwd().deleteFile(self.io, tmpObjPathSlice) catch {};
+            defer std.Io.Dir.cwd().deleteFile(self.io, tmpExePathSlice) catch {};
+
+            const ccResult = try std.process.run(allocator, self.io, .{
+                .argv = &.{ "zig", "cc", "-o", tmpExePath, tmpObjPath, "-ldl" },
+            });
+            defer allocator.free(ccResult.stdout);
+            defer allocator.free(ccResult.stderr);
+
+            const linkFailed = switch (ccResult.term) {
+                .exited => |code| code != 0,
+                else => true,
+            };
+            if (linkFailed) {
+                std.debug.print("Linker error:\n{s}\n", .{ccResult.stderr});
+                return;
+            }
+
+            const entryDirPath = std.fs.path.dirname(args.entryPoint) orelse ".";
+            const runResult = try std.process.run(allocator, self.io, .{
+                .argv = &.{tmpExePath},
+                .cwd = .{ .path = entryDirPath },
+            });
+            defer allocator.free(runResult.stdout);
+            defer allocator.free(runResult.stderr);
+
+            if (runResult.stdout.len > 0) try std.Io.File.stdout().writeStreamingAll(self.io, runResult.stdout);
+            if (runResult.stderr.len > 0) try std.Io.File.stderr().writeStreamingAll(self.io, runResult.stderr);
+
+            const runFailed = switch (runResult.term) {
+                .exited => |code| code != 0,
+                else => true,
+            };
+            if (runFailed) return;
+        } else {
+            core.LLVMDisposeModule(llvmModule);
         }
     }
 }

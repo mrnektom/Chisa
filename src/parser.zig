@@ -1273,20 +1273,24 @@ fn nextPostfixChain(self: *Self, initial: ast.expr.ZSExpr) Error!ast.expr.ZSExpr
 
             // Build the match arms
             const arms = try self.allocator.alloc(ast.expr.ZSMatchArm, 2);
+            const leftPatterns = try self.allocator.alloc(ast.expr.ZSMatchArmPattern, 1);
+            leftPatterns[0] = ast.expr.ZSMatchArmPattern{ .enum_variant = .{
+                .enum_name = "Either",
+                .variant_name = "Left",
+                .binding = "__e",
+            } };
             arms[0] = .{
-                .pattern = ast.expr.ZSMatchArmPattern{ .enum_variant = .{
-                    .enum_name = "Either",
-                    .variant_name = "Left",
-                    .binding = "__e",
-                } },
+                .patterns = leftPatterns,
                 .body = returnEPtr,
             };
+            const rightPatterns = try self.allocator.alloc(ast.expr.ZSMatchArmPattern, 1);
+            rightPatterns[0] = ast.expr.ZSMatchArmPattern{ .enum_variant = .{
+                .enum_name = "Either",
+                .variant_name = "Right",
+                .binding = "__v",
+            } };
             arms[1] = .{
-                .pattern = ast.expr.ZSMatchArmPattern{ .enum_variant = .{
-                    .enum_name = "Either",
-                    .variant_name = "Right",
-                    .binding = "__v",
-                } },
+                .patterns = rightPatterns,
                 .body = vRefPtr,
             };
 
@@ -1329,18 +1333,7 @@ fn nextCharLiteral(self: *Self) Error!?ast.expr.ZSChar {
     self.shiftToken();
 
     const raw = token.value; // e.g., 'a' or '\n'
-    // Strip surrounding quotes
-    if (raw.len < 3) return Error.UnexpectedToken; // malformed char literal (e.g. '')
-    const inner = raw[1 .. raw.len - 1];
-    const value: u8 = if (inner.len == 2 and inner[0] == '\\') switch (inner[1]) {
-        'n' => '\n',
-        't' => '\t',
-        'r' => '\r',
-        '\\' => '\\',
-        '\'' => '\'',
-        '0' => 0,
-        else => inner[1],
-    } else if (inner.len >= 1) inner[0] else return Error.UnexpectedToken;
+    const value = try parseCharLiteralValue(raw);
 
     return ast.expr.ZSChar{
         .value = value,
@@ -1993,99 +1986,18 @@ fn nextMatchExpr(self: *Self) Error!?ast.expr.ZSMatchExpr {
             break;
         }
 
-        // Determine pattern kind by peeking at the first token
-        const patToken = try self.peekToken();
-        const pattern: ast.expr.ZSMatchArmPattern = blk: {
-            if (patToken.type == .numeric) {
-                self.shiftToken();
-                break :blk ast.expr.ZSMatchArmPattern{ .number_literal = patToken.value };
-            }
-            if (patToken.type == .string) {
-                self.shiftToken();
-                break :blk ast.expr.ZSMatchArmPattern{ .string_literal = patToken.value };
-            }
-            if (patToken.type == .char_literal) {
-                self.shiftToken();
-                const ch: u8 = if (patToken.value.len > 0) patToken.value[0] else 0;
-                break :blk ast.expr.ZSMatchArmPattern{ .char_literal = ch };
-            }
-            if (std.mem.eql(u8, patToken.value, "true")) {
-                self.shiftToken();
-                break :blk ast.expr.ZSMatchArmPattern{ .boolean_literal = true };
-            }
-            if (std.mem.eql(u8, patToken.value, "false")) {
-                self.shiftToken();
-                break :blk ast.expr.ZSMatchArmPattern{ .boolean_literal = false };
-            }
-            // Peek to disambiguate: ident '{' = struct pattern, ident '.' = enum variant
-            const identName = try self.nextIdent();
-            if (self.checkToken("{")) {
-                self.shiftToken();
-                var fields = try std.ArrayList(ast.expr.ZSStructFieldPattern).initCapacity(self.allocator, 4);
-                defer fields.deinit(self.allocator);
-                while (!self.checkToken("}")) {
-                    const fieldName = try self.nextIdent();
-                    var binding_name: ?[]const u8 = null;
-                    var value_pattern: ?*ast.expr.ZSMatchArmPattern = null;
-                    if (self.checkToken(":")) {
-                        self.shiftToken();
-                        const vpatTok = try self.peekToken();
-                        if (vpatTok.type == .numeric) {
-                            self.shiftToken();
-                            const vp = try self.allocator.create(ast.expr.ZSMatchArmPattern);
-                            vp.* = ast.expr.ZSMatchArmPattern{ .number_literal = vpatTok.value };
-                            value_pattern = vp;
-                        } else if (vpatTok.type == .string) {
-                            self.shiftToken();
-                            const vp = try self.allocator.create(ast.expr.ZSMatchArmPattern);
-                            vp.* = ast.expr.ZSMatchArmPattern{ .string_literal = vpatTok.value };
-                            value_pattern = vp;
-                        } else if (std.mem.eql(u8, vpatTok.value, "true")) {
-                            self.shiftToken();
-                            const vp = try self.allocator.create(ast.expr.ZSMatchArmPattern);
-                            vp.* = ast.expr.ZSMatchArmPattern{ .boolean_literal = true };
-                            value_pattern = vp;
-                        } else if (std.mem.eql(u8, vpatTok.value, "false")) {
-                            self.shiftToken();
-                            const vp = try self.allocator.create(ast.expr.ZSMatchArmPattern);
-                            vp.* = ast.expr.ZSMatchArmPattern{ .boolean_literal = false };
-                            value_pattern = vp;
-                        } else {
-                            // binding alias: Point { x: px, y }
-                            binding_name = try self.nextIdent();
-                        }
-                    } else {
-                        // Short binding: field name is also the binding name
-                        binding_name = fieldName;
-                    }
-                    try fields.append(self.allocator, .{
-                        .name = fieldName,
-                        .binding_name = binding_name,
-                        .value_pattern = value_pattern,
-                    });
-                    if (self.checkToken(",")) self.shiftToken();
-                }
-                try self.expectToken("}");
-                break :blk ast.expr.ZSMatchArmPattern{ .struct_destructure = .{
-                    .struct_name = identName,
-                    .fields = try self.allocator.dupe(ast.expr.ZSStructFieldPattern, fields.items),
-                } };
-            }
-            // Enum variant: EnumName.VariantName or EnumName.VariantName(binding)
-            try self.expectToken(".");
-            const variantName = try self.nextIdent();
-            var binding: ?[]const u8 = null;
-            if (self.checkToken("(")) {
-                self.shiftToken();
-                binding = try self.nextIdent();
-                try self.expectToken(")");
-            }
-            break :blk ast.expr.ZSMatchArmPattern{ .enum_variant = .{
-                .enum_name = identName,
-                .variant_name = variantName,
-                .binding = binding,
-            } };
-        };
+        const firstPattern = try self.nextMatchArmPattern();
+        var patterns = try std.ArrayList(ast.expr.ZSMatchArmPattern).initCapacity(self.allocator, 1);
+        defer patterns.deinit(self.allocator);
+        try patterns.append(self.allocator, firstPattern);
+
+        while (self.checkToken(",")) {
+            if (!isLiteralMatchArmPattern(firstPattern)) return Error.UnexpectedToken;
+            self.shiftToken();
+            const nextPattern = try self.nextLiteralMatchArmPattern();
+            if (!sameLiteralMatchArmPatternKind(firstPattern, nextPattern)) return Error.UnexpectedToken;
+            try patterns.append(self.allocator, nextPattern);
+        }
 
         try self.expectToken("->");
 
@@ -2094,7 +2006,7 @@ fn nextMatchExpr(self: *Self) Error!?ast.expr.ZSMatchExpr {
         bodyPtr.* = body;
 
         try arms.append(self.allocator, .{
-            .pattern = pattern,
+            .patterns = try self.allocator.dupe(ast.expr.ZSMatchArmPattern, patterns.items),
             .body = bodyPtr,
         });
 
@@ -2116,6 +2028,167 @@ fn nextMatchExpr(self: *Self) Error!?ast.expr.ZSMatchExpr {
         .startPos = startToken.startPos,
         .endPos = endToken.endPos,
     };
+}
+
+fn isLiteralMatchArmPattern(pattern: ast.expr.ZSMatchArmPattern) bool {
+    return switch (pattern) {
+        .number_literal, .boolean_literal, .char_literal, .string_literal => true,
+        else => false,
+    };
+}
+
+fn sameLiteralMatchArmPatternKind(left: ast.expr.ZSMatchArmPattern, right: ast.expr.ZSMatchArmPattern) bool {
+    return switch (left) {
+        .number_literal => right == .number_literal,
+        .boolean_literal => right == .boolean_literal,
+        .char_literal => right == .char_literal,
+        .string_literal => right == .string_literal,
+        else => false,
+    };
+}
+
+fn nextLiteralMatchArmPattern(self: *Self) Error!ast.expr.ZSMatchArmPattern {
+    const patToken = try self.peekToken();
+    if (patToken.type == .numeric) {
+        self.shiftToken();
+        return ast.expr.ZSMatchArmPattern{ .number_literal = patToken.value };
+    }
+    if (patToken.type == .string) {
+        self.shiftToken();
+        return ast.expr.ZSMatchArmPattern{ .string_literal = try parseStringLiteralValue(self.allocator, patToken.value) };
+    }
+    if (patToken.type == .char_literal) {
+        self.shiftToken();
+        return ast.expr.ZSMatchArmPattern{ .char_literal = try parseCharLiteralValue(patToken.value) };
+    }
+    if (std.mem.eql(u8, patToken.value, "true")) {
+        self.shiftToken();
+        return ast.expr.ZSMatchArmPattern{ .boolean_literal = true };
+    }
+    if (std.mem.eql(u8, patToken.value, "false")) {
+        self.shiftToken();
+        return ast.expr.ZSMatchArmPattern{ .boolean_literal = false };
+    }
+    return Error.UnexpectedToken;
+}
+
+fn nextMatchArmPattern(self: *Self) Error!ast.expr.ZSMatchArmPattern {
+    const patToken = try self.peekToken();
+    if (patToken.type == .numeric or
+        patToken.type == .string or
+        patToken.type == .char_literal or
+        std.mem.eql(u8, patToken.value, "true") or
+        std.mem.eql(u8, patToken.value, "false"))
+    {
+        return try self.nextLiteralMatchArmPattern();
+    }
+
+    // Peek to disambiguate: ident '{' = struct pattern, ident '.' = enum variant
+    const identName = try self.nextIdent();
+    if (self.checkToken("{")) {
+        self.shiftToken();
+        var fields = try std.ArrayList(ast.expr.ZSStructFieldPattern).initCapacity(self.allocator, 4);
+        defer fields.deinit(self.allocator);
+        while (!self.checkToken("}")) {
+            const fieldName = try self.nextIdent();
+            var binding_name: ?[]const u8 = null;
+            var value_pattern: ?*ast.expr.ZSMatchArmPattern = null;
+            if (self.checkToken(":")) {
+                self.shiftToken();
+                const vpatTok = try self.peekToken();
+                if (vpatTok.type == .numeric or
+                    vpatTok.type == .string or
+                    vpatTok.type == .char_literal or
+                    std.mem.eql(u8, vpatTok.value, "true") or
+                    std.mem.eql(u8, vpatTok.value, "false"))
+                {
+                    const vp = try self.allocator.create(ast.expr.ZSMatchArmPattern);
+                    vp.* = try self.nextLiteralMatchArmPattern();
+                    value_pattern = vp;
+                } else {
+                    // binding alias: Point { x: px, y }
+                    binding_name = try self.nextIdent();
+                }
+            } else {
+                // Short binding: field name is also the binding name
+                binding_name = fieldName;
+            }
+            try fields.append(self.allocator, .{
+                .name = fieldName,
+                .binding_name = binding_name,
+                .value_pattern = value_pattern,
+            });
+            if (self.checkToken(",")) self.shiftToken();
+        }
+        try self.expectToken("}");
+        return ast.expr.ZSMatchArmPattern{ .struct_destructure = .{
+            .struct_name = identName,
+            .fields = try self.allocator.dupe(ast.expr.ZSStructFieldPattern, fields.items),
+        } };
+    }
+
+    // Enum variant: EnumName.VariantName or EnumName.VariantName(binding)
+    try self.expectToken(".");
+    const variantName = try self.nextIdent();
+    var binding: ?[]const u8 = null;
+    if (self.checkToken("(")) {
+        self.shiftToken();
+        binding = try self.nextIdent();
+        try self.expectToken(")");
+    }
+    return ast.expr.ZSMatchArmPattern{ .enum_variant = .{
+        .enum_name = identName,
+        .variant_name = variantName,
+        .binding = binding,
+    } };
+}
+
+fn parseCharLiteralValue(raw: []const u8) Error!u8 {
+    if (raw.len < 3) return Error.UnexpectedToken;
+    const inner = raw[1 .. raw.len - 1];
+    return if (inner.len == 2 and inner[0] == '\\') switch (inner[1]) {
+        'n' => '\n',
+        't' => '\t',
+        'r' => '\r',
+        '\\' => '\\',
+        '\'' => '\'',
+        '0' => 0,
+        else => inner[1],
+    } else if (inner.len >= 1) inner[0] else Error.UnexpectedToken;
+}
+
+fn parseStringLiteralValue(allocator: std.mem.Allocator, raw: []const u8) Error![]const u8 {
+    if (raw.len < 2 or raw[0] != '"' or raw[raw.len - 1] != '"') {
+        return Error.UnexpectedToken;
+    }
+
+    const inner = raw[1 .. raw.len - 1];
+    var buf = try std.ArrayList(u8).initCapacity(allocator, inner.len);
+    defer buf.deinit(allocator);
+
+    var i: usize = 0;
+    while (i < inner.len) {
+        if (inner[i] == '\\' and i + 1 < inner.len) {
+            switch (inner[i + 1]) {
+                'n' => try buf.append(allocator, '\n'),
+                't' => try buf.append(allocator, '\t'),
+                'r' => try buf.append(allocator, '\r'),
+                '\\' => try buf.append(allocator, '\\'),
+                '"' => try buf.append(allocator, '"'),
+                '0' => try buf.append(allocator, 0),
+                else => {
+                    try buf.append(allocator, inner[i]);
+                    try buf.append(allocator, inner[i + 1]);
+                },
+            }
+            i += 2;
+        } else {
+            try buf.append(allocator, inner[i]);
+            i += 1;
+        }
+    }
+
+    return allocator.dupe(u8, buf.items);
 }
 
 fn nextType(self: *Self) !?ast.ZSTypeNotation {

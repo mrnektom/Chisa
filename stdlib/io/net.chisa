@@ -107,7 +107,7 @@ fn allocBuf(size: long): Pointer<char> {
     out rax = addr
     "syscall"
   }
-  return addr
+  return addr as Pointer<char>
 }
 
 fn freeBuf(addr: Pointer<char>, size: long): void {
@@ -206,11 +206,10 @@ export fn closeSocket(fd: number): void {
 }
 
 fn isSpace(ch: char): boolean {
-  if (ch == ' ') return true
-  if (ch == '\t') return true
-  if (ch == '\n') return true
-  if (ch == '\r') return true
-  return false
+  return match ch {
+    ' ', '\t', '\n', '\r' -> true
+    else -> false
+  }
 }
 
 fn isDigit(ch: char): boolean {
@@ -330,14 +329,22 @@ fn encodeDnsQuestion(packet: Pointer<char>, host: String): number {
   return pos + 5
 }
 
+fn byteValue(ch: char): number {
+  let value = ch - '\0'
+  if (value < 0) {
+    return value + 256
+  }
+  return value
+}
+
 fn readDnsU16(packet: Pointer<char>, pos: number): number {
-  return packet[pos] * 256 + packet[pos + 1]
+  return byteValue(packet[pos]) * 256 + byteValue(packet[pos + 1])
 }
 
 fn skipDnsName(packet: Pointer<char>, size: number, pos: number): number {
   let cursor: number = pos
   while (cursor < size) {
-    let labelLen = packet[cursor] - '\0'
+    let labelLen = byteValue(packet[cursor])
     if (labelLen == 0) return cursor + 1
     if (labelLen >= 192) {
       if (cursor + 1 >= size) return 0 - 1
@@ -378,10 +385,10 @@ fn parseDnsResponse(packet: Pointer<char>, size: number): Either<NetError, Ipv4A
       if (recordClass == 1) {
         if (dataLen == 4) {
           return Either.Right(Ipv4Address {
-            a: packet[cursor],
-            b: packet[cursor + 1],
-            c: packet[cursor + 2],
-            d: packet[cursor + 3],
+            a: byteValue(packet[cursor]),
+            b: byteValue(packet[cursor + 1]),
+            c: byteValue(packet[cursor + 2]),
+            d: byteValue(packet[cursor + 3]),
           })
         }
       }

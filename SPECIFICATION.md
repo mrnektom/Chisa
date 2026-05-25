@@ -512,8 +512,8 @@ let x = Option.Some(42)   // variant constructor with payload
 
 ## Pattern Matching
 
-`match` is an expression and returns a value. Arms have the form `Pattern -> expr`. The `else` arm is a wildcard that
-matches anything.
+`match` is an expression and returns a value. Arms have the form `Pattern -> expr`. Literal arms may group several
+comma-separated literals before `->`. The `else` arm is a wildcard that matches anything.
 
 ### Primitives
 
@@ -526,6 +526,16 @@ let result = match x {
 ```
 
 Supported for `number`, `boolean`, `char`, and `string` literals.
+
+```chisa
+let result = match x {
+    0, 1, 2 -> "small",   // one arm, several literal alternatives
+    3       -> "three",
+    else    -> "other"
+}
+```
+
+When several literals appear in one arm, they must all be literal patterns of the same kind.
 
 ### Enums
 

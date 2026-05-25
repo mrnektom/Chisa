@@ -29,6 +29,32 @@ fn compileFileToNative(path: []const u8) !void {
     });
 }
 
+fn compileRunExpectStdout(path: []const u8, expected_stdout: []const u8) !void {
+    const output_path = "/tmp/chisa_codegen_runtime_test_output";
+
+    var p = try Pipeline.init(testing.allocator, testing.io);
+    defer p.deinit();
+    try p.compile(.{
+        .entryPoint = path,
+        .dumpIr = false,
+        .outputPath = output_path,
+        .run = false,
+        .debug = false,
+    });
+
+    const result = try std.process.run(testing.allocator, testing.io, .{
+        .argv = &.{output_path},
+    });
+    defer testing.allocator.free(result.stdout);
+    defer testing.allocator.free(result.stderr);
+
+    switch (result.term) {
+        .exited => |code| try testing.expectEqual(@as(u8, 0), code),
+        else => return error.UnexpectedRuntimeTermination,
+    }
+    try testing.expectEqualStrings(expected_stdout, result.stdout);
+}
+
 fn expectCompileError(path: []const u8) !void {
     compileFile(path) catch return;
     return error.ExpectedCompileFailure;
@@ -108,6 +134,10 @@ test "match: number literal arms" {
     try compileFile("tests/fixtures/match_primitives.chisa");
 }
 
+test "match: grouped literal arms" {
+    try compileFile("tests/fixtures/match_literal_list.chisa");
+}
+
 test "match: enum payload binding" {
     try compileFile("tests/fixtures/match_enums.chisa");
 }
@@ -118,6 +148,10 @@ test "match: struct field patterns" {
 
 test "match: wildcard else arm" {
     try compileFile("tests/fixtures/match_wildcard.chisa");
+}
+
+test "match: literal pattern type must match subject" {
+    try expectCompileError("tests/fixtures/errors/match_literal_subject_mismatch.chisa");
 }
 
 test "control flow: if expression and statement" {
@@ -188,6 +222,10 @@ test "casts: primitive as coercions compile to native" {
     try compileFileToNative("tests/fixtures/primitives_as_cast.chisa");
 }
 
+test "casts: integer and pointer coercions compile to native" {
+    try compileFileToNative("tests/fixtures/pointer_as_cast.chisa");
+}
+
 test "type alias: basic declaration" {
     try compileFile("tests/fixtures/type_alias.chisa");
 }
@@ -234,6 +272,22 @@ test "codegen: Either<byte pointer> propagation compiles to native" {
 
 test "codegen: imported match payload keeps enum methods" {
     try compileFileToNative("tests/fixtures/either_match_imported_payload_consumer.chisa");
+}
+
+test "codegen: grouped literal arms compile to native" {
+    try compileFileToNative("tests/fixtures/match_literal_list.chisa");
+}
+
+test "codegen: string literal match runs" {
+    try compileRunExpectStdout("tests/e2e/match_string_runtime.chisa", "7\n");
+}
+
+test "codegen: struct destructure match runs" {
+    try compileRunExpectStdout("tests/e2e/match_struct_runtime.chisa", "5\n");
+}
+
+test "codegen: enum payload struct survives runtime match" {
+    try compileRunExpectStdout("tests/e2e/enum_struct_payload_runtime.chisa", "16\n");
 }
 
 // ── Unimplemented feature tests (skipped) ────────────────────────────────────

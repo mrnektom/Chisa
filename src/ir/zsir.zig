@@ -372,12 +372,29 @@ pub const ZSIREnumInit = struct {
     }
 };
 
-pub const ZSIRMatchPatternKind = enum { variant_tag, number_literal, boolean_literal, char_literal, string_literal, struct_destructure };
+pub const ZSIRMatchLiteralKind = enum { number, boolean, char, string };
+
+pub const ZSIRMatchLiteral = union(ZSIRMatchLiteralKind) {
+    number: []const u8,
+    boolean: bool,
+    char: u8,
+    string: []const u8,
+};
+
+pub const ZSIRStructFieldPattern = struct {
+    fieldIndex: u32,
+    binding: ?[]const u8 = null,
+    literal: ?ZSIRMatchLiteral = null,
+};
+
+pub const ZSIRMatchPattern = union(enum) {
+    variant_tag: u32,
+    literal: ZSIRMatchLiteral,
+    struct_destructure: []ZSIRStructFieldPattern,
+};
 
 pub const ZSIRMatchArm = struct {
-    patternKind: ZSIRMatchPatternKind = .variant_tag,
-    variantTag: u32 = 0,
-    literalValue: []const u8 = "",
+    patterns: []ZSIRMatchPattern,
     binding: ?[]const u8,
     bindingType: ?[]const u8 = null,
     body: []ZSIR,
@@ -397,6 +414,18 @@ pub const ZSIRMatch = struct {
         if (self.resultName) |n| allocator.free(n);
         for (self.arms) |arm| {
             if (arm.binding) |b| allocator.free(b);
+            for (arm.patterns) |pattern| {
+                switch (pattern) {
+                    .struct_destructure => |fields| {
+                        for (fields) |field| {
+                            if (field.binding) |binding| allocator.free(binding);
+                        }
+                        allocator.free(fields);
+                    },
+                    else => {},
+                }
+            }
+            allocator.free(arm.patterns);
             for (arm.body) |inst| inst.deinit(allocator);
             allocator.free(arm.body);
         }

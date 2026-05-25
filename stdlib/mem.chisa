@@ -10,7 +10,7 @@ export fn alloc(size: long): Pointer<char> {
     out rax = addr
     "syscall"
   }
-  return addr
+  return addr as Pointer<char>
 }
 
 export fn free<T>(addr: Pointer<T>, size: long): void {

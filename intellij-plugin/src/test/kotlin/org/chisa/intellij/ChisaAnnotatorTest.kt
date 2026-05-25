@@ -1,5 +1,6 @@
 package org.chisa.intellij
 
+import com.intellij.lang.annotation.HighlightSeverity
 import com.intellij.psi.util.PsiTreeUtil
 import com.intellij.testFramework.fixtures.BasePlatformTestCase
 import org.chisa.intellij.highlighting.ChisaSyntaxHighlighter
@@ -20,6 +21,21 @@ class ChisaAnnotatorTest : BasePlatformTestCase() {
         }
         assertFalse("Function declaration name should be highlighted", highlights.isEmpty())
         assertTrue(highlights.any { file.text.substring(it.startOffset, it.endOffset) == "greet" })
+    }
+
+    fun testExtensionFunctionDeclarationHighlighted() {
+        val file = myFixture.configureByText(
+            "main.chisa",
+            """
+            fn number.double(): number = this * 2
+            """.trimIndent()
+        )
+        val highlights = myFixture.doHighlighting().filter {
+            it.forcedTextAttributesKey == ChisaSyntaxHighlighter.FUNCTION_NAME
+        }
+
+        assertFalse("Extension function declaration name should be highlighted", highlights.isEmpty())
+        assertTrue(highlights.any { file.text.substring(it.startOffset, it.endOffset) == "double" })
     }
 
     fun testFunctionCallHighlighted() {
@@ -157,5 +173,30 @@ class ChisaAnnotatorTest : BasePlatformTestCase() {
         assertNotNull("Struct literal field x should resolve to ChisaStructField", literalXRef)
         val resolved = literalXRef!!.reference.resolve() as ChisaStructField
         assertEquals("x", resolved.name)
+    }
+
+    fun testGroupedLiteralMatchArmParsesWithoutErrors() {
+        val file = myFixture.configureByText(
+            "main.chisa",
+            """
+            fn greet(): number = 1
+            let result = match 1 {
+                0, 1, 2 -> greet(),
+                else -> 0
+            }
+            """.trimIndent()
+        )
+
+        val highlights = myFixture.doHighlighting()
+        val errors = highlights.filter { it.severity == HighlightSeverity.ERROR }
+        assertTrue("Grouped literal match arm should parse without IDE errors: $errors", errors.isEmpty())
+
+        val functionCallHighlights = highlights.filter {
+            it.forcedTextAttributesKey == ChisaSyntaxHighlighter.FUNCTION_CALL
+        }
+        assertTrue(
+            "Function call in grouped literal match arm should still be highlighted",
+            functionCallHighlights.any { file.text.substring(it.startOffset, it.endOffset) == "greet" }
+        )
     }
 }
